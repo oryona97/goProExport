@@ -13,6 +13,8 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const DEFAULT_DOWNLOAD_ROOT = path.join(__dirname, "downloads");
 const KEEP_ALIVE_INTERVAL_MS = 3000;
 const JSON_LIMIT_BYTES = 1024 * 128;
+const JOB_PROGRESS_SAMPLE_TTL_MS = 15000;
+const JOB_PROGRESS_SAMPLE_LIMIT = 60;
 
 const DOC_SUMMARY = [
   {
@@ -168,6 +170,10 @@ async function routeRequest(req, res) {
 
   if (pathname === "/" && req.method === "GET") {
     return serveStaticFile(res, path.join(PUBLIC_DIR, "index.html"));
+  }
+
+  if (pathname === "/main" && req.method === "GET") {
+    return serveStaticFile(res, path.join(PUBLIC_DIR, "main.html"));
   }
 
   if (pathname.startsWith("/")) {
@@ -912,9 +918,11 @@ async function createDownloadJob(options) {
       error: null
     })),
     completedFiles: 0,
-    completedBytes: 0
+    completedBytes: 0,
+    progressSamples: []
   };
 
+  recordJobProgress(job);
   state.downloadJobs.set(job.id, job);
 
   setImmediate(() => {
@@ -928,6 +936,7 @@ async function runDownloadJob(job) {
   job.status = "running";
   job.startedAt = new Date().toISOString();
   job.error = null;
+  recordJobProgress(job);
 
   try {
     await fsp.mkdir(job.downloadRoot, { recursive: true });
@@ -945,17 +954,20 @@ async function runDownloadJob(job) {
             item.sizeBytes = totalBytes;
           }
           item.downloadedBytes = downloadedBytes;
+          recordJobProgress(job);
         });
 
         item.downloadedBytes = result.downloadedBytes;
         item.status = "completed";
         job.completedFiles += 1;
         job.completedBytes += result.downloadedBytes;
+        recordJobProgress(job);
       } catch (error) {
         item.status = "failed";
         item.error = error instanceof Error ? error.message : String(error);
         job.status = "failed";
         job.error = item.error;
+        recordJobProgress(job);
         throw error;
       }
     }
@@ -968,6 +980,7 @@ async function runDownloadJob(job) {
     }
   } finally {
     job.finishedAt = new Date().toISOString();
+    recordJobProgress(job);
   }
 }
 
@@ -1055,14 +1068,21 @@ function presentDownloadJob(job) {
   const runningItem = job.items.find((item) => item.status === "running") || null;
   const totalFiles = job.items.length;
   const totalBytes = job.items.reduce((sum, item) => sum + Number(item.sizeBytes || 0), 0);
-  const transferredBytes = job.completedBytes + Number(runningItem ? runningItem.downloadedBytes : 0);
+  const transferredBytes = getJobTransferredBytes(job);
+  const speedBytesPerSecond = calculateTransferRate(job);
+  const remainingBytes = Math.max(0, totalBytes - transferredBytes);
   const currentItem = runningItem
     ? {
         directory: runningItem.directory,
         name: runningItem.name,
         downloadedBytes: runningItem.downloadedBytes,
         sizeBytes: Number(runningItem.sizeBytes || 0),
-        percent: calculatePercent(runningItem.downloadedBytes, runningItem.sizeBytes)
+        percent: calculatePercent(runningItem.downloadedBytes, runningItem.sizeBytes),
+        remainingBytes: Math.max(0, Number(runningItem.sizeBytes || 0) - Number(runningItem.downloadedBytes || 0)),
+        etaSeconds: calculateEtaSeconds(
+          Math.max(0, Number(runningItem.sizeBytes || 0) - Number(runningItem.downloadedBytes || 0)),
+          speedBytesPerSecond
+        )
       }
     : null;
 
@@ -1079,7 +1099,10 @@ function presentDownloadJob(job) {
     completedFiles: job.completedFiles,
     totalBytes,
     transferredBytes,
+    remainingBytes,
     overallPercent: calculatePercent(transferredBytes, totalBytes),
+    speedBytesPerSecond,
+    etaSeconds: calculateEtaSeconds(remainingBytes, speedBytesPerSecond),
     currentItem,
     files: job.items.map((item) => ({
       directory: item.directory,
@@ -1090,6 +1113,84 @@ function presentDownloadJob(job) {
       error: item.error
     }))
   };
+}
+
+function recordJobProgress(job) {
+  if (!job) {
+    return;
+  }
+
+  const sample = {
+    at: Date.now(),
+    bytes: getJobTransferredBytes(job)
+  };
+
+  job.progressSamples.push(sample);
+
+  const cutoff = sample.at - JOB_PROGRESS_SAMPLE_TTL_MS;
+  job.progressSamples = job.progressSamples
+    .filter((entry) => entry.at >= cutoff)
+    .slice(-JOB_PROGRESS_SAMPLE_LIMIT);
+}
+
+function getJobTransferredBytes(job) {
+  const runningItem = job.items.find((item) => item.status === "running");
+  return job.completedBytes + Number(runningItem ? runningItem.downloadedBytes : 0);
+}
+
+function calculateTransferRate(job) {
+  if (!job || job.status !== "running") {
+    return null;
+  }
+
+  const samples = getProgressSamplesForRate(job);
+  if (samples.length < 2) {
+    return null;
+  }
+
+  const latest = samples[samples.length - 1];
+  const recentSamples = samples.filter((sample) => latest.at - sample.at <= 8000);
+  let baseline = recentSamples[0] || samples[0];
+
+  if (latest.at - baseline.at < 1000) {
+    baseline = samples[0];
+  }
+
+  const elapsedMs = latest.at - baseline.at;
+  const deltaBytes = latest.bytes - baseline.bytes;
+
+  if (elapsedMs <= 0 || deltaBytes < 0) {
+    return null;
+  }
+
+  return Number(((deltaBytes / elapsedMs) * 1000).toFixed(1));
+}
+
+function getProgressSamplesForRate(job) {
+  const samples = Array.isArray(job.progressSamples) ? [...job.progressSamples] : [];
+  const transferredBytes = getJobTransferredBytes(job);
+  const now = Date.now();
+  const latestSample = samples[samples.length - 1];
+
+  if (!latestSample || latestSample.at !== now || latestSample.bytes !== transferredBytes) {
+    samples.push({
+      at: now,
+      bytes: transferredBytes
+    });
+  }
+
+  return samples;
+}
+
+function calculateEtaSeconds(remainingBytes, speedBytesPerSecond) {
+  const remaining = Number(remainingBytes || 0);
+  const rate = Number(speedBytesPerSecond || 0);
+
+  if (!remaining || !rate) {
+    return null;
+  }
+
+  return Math.max(1, Math.ceil(remaining / rate));
 }
 
 function calculatePercent(value, total) {

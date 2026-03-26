@@ -10,11 +10,17 @@ const state = {
     streamUrl: null,
     error: null
   },
+  pendingQueue: [],
+  queueSequence: 0,
   downloadJob: null,
-  downloadPollTimer: null
+  downloadPollTimer: null,
+  downloadCenterCollapsed: false,
+  downloadCenterFollowing: false
 };
 
 const ASSET_VERSION = Date.now();
+const DOWNLOAD_ROOT_STORAGE_KEY = "gopro.downloadRoot";
+const DOWNLOAD_CENTER_COLLAPSED_STORAGE_KEY = "gopro.downloadCenterCollapsed";
 
 const els = {
   docsGrid: document.querySelector("#docs-grid"),
@@ -35,13 +41,39 @@ const els = {
   refreshMediaBtn: document.querySelector("#refresh-media-btn"),
   downloadSelectedBtn: document.querySelector("#download-selected-btn"),
   downloadAllBtn: document.querySelector("#download-all-btn"),
+  downloadCenterPanel: document.querySelector("#download-center-panel"),
+  downloadCenterShell: document.querySelector("#download-center-shell"),
+  downloadCenterToggle: document.querySelector("#download-center-toggle"),
+  downloadCenterFloatingToggle: document.querySelector("#download-center-floating-toggle"),
   downloadStatusCard: document.querySelector("#download-status-card"),
+  downloadBadge: document.querySelector("#download-badge"),
+  queueCountPill: document.querySelector("#queue-count-pill"),
+  foldedFileName: document.querySelector("#folded-file-name"),
+  foldedFileMeta: document.querySelector("#folded-file-meta"),
+  foldedStatus: document.querySelector("#folded-status"),
+  foldedDownloaded: document.querySelector("#folded-downloaded"),
+  foldedCompleted: document.querySelector("#folded-completed"),
+  foldedSpeed: document.querySelector("#folded-speed"),
+  foldedEta: document.querySelector("#folded-eta"),
   downloadHeadline: document.querySelector("#download-headline"),
+  downloadInlineMeta: document.querySelector("#download-inline-meta"),
   overallProgressFill: document.querySelector("#overall-progress-fill"),
   overallProgressText: document.querySelector("#overall-progress-text"),
   currentProgressFill: document.querySelector("#current-progress-fill"),
   currentProgressText: document.querySelector("#current-progress-text"),
+  statTotalFiles: document.querySelector("#stat-total-files"),
+  statCompletedFiles: document.querySelector("#stat-completed-files"),
+  statTransferred: document.querySelector("#stat-transferred"),
+  statDownloadRoot: document.querySelector("#stat-download-root"),
+  currentFileName: document.querySelector("#current-file-name"),
+  currentFileMeta: document.querySelector("#current-file-meta"),
+  activeJobList: document.querySelector("#active-job-list"),
   downloadSummary: document.querySelector("#download-summary"),
+  startQueueBtn: document.querySelector("#start-queue-btn"),
+  clearQueueBtn: document.querySelector("#clear-queue-btn"),
+  queueTitle: document.querySelector("#queue-title"),
+  queueSummary: document.querySelector("#queue-summary"),
+  queueList: document.querySelector("#queue-list"),
   previewTitle: document.querySelector("#preview-title"),
   previewBody: document.querySelector("#preview-body"),
   previewMeta: document.querySelector("#preview-meta"),
@@ -49,9 +81,12 @@ const els = {
 };
 
 window.addEventListener("DOMContentLoaded", async () => {
+  restoreDownloadRoot();
+  restoreDownloadCenterCollapsed();
   wireEvents();
   renderPreview();
   renderDownloadJob();
+  renderPendingQueue();
   await runUiTask(async () => {
     await Promise.all([loadDocs(), refreshStatus()]);
   });
@@ -63,29 +98,35 @@ window.addEventListener("beforeunload", () => {
 });
 
 function wireEvents() {
-  els.connectForm.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void runUiTask(connectCamera);
-  });
+  if (els.connectForm) {
+    els.connectForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void runUiTask(connectCamera);
+    });
+  }
 
-  els.discoverBtn.addEventListener("click", () => {
-    void runUiTask(() => refreshCandidates(true));
-  });
+  if (els.discoverBtn) {
+    els.discoverBtn.addEventListener("click", () => {
+      void runUiTask(() => refreshCandidates(true));
+    });
+  }
 
-  els.disconnectBtn.addEventListener("click", () => {
-    void runUiTask(disconnectCamera);
-  });
+  if (els.disconnectBtn) {
+    els.disconnectBtn.addEventListener("click", () => {
+      void runUiTask(disconnectCamera);
+    });
+  }
 
   els.refreshMediaBtn.addEventListener("click", () => {
     void runUiTask(refreshMedia);
   });
 
   els.downloadSelectedBtn.addEventListener("click", () => {
-    void runUiTask(downloadSelected);
+    void runUiTask(queueSelected);
   });
 
   els.downloadAllBtn.addEventListener("click", () => {
-    void runUiTask(() => downloadFiles(state.media));
+    void runUiTask(() => addFilesToQueue(state.media, "browser"));
   });
 
   els.previewDownloadBtn.addEventListener("click", () => {
@@ -94,8 +135,31 @@ function wireEvents() {
       return;
     }
 
-    void runUiTask(() => downloadFiles([state.preview.file]));
+    void runUiTask(() => addFilesToQueue([state.preview.file], "preview"));
   });
+
+  els.startQueueBtn.addEventListener("click", () => {
+    void runUiTask(startPendingQueueDownload);
+  });
+
+  els.clearQueueBtn.addEventListener("click", () => {
+    clearPendingQueue();
+  });
+
+  if (els.downloadCenterToggle) {
+    els.downloadCenterToggle.addEventListener("click", () => {
+      setDownloadCenterCollapsed(!state.downloadCenterCollapsed);
+    });
+  }
+
+  if (els.downloadCenterFloatingToggle) {
+    els.downloadCenterFloatingToggle.addEventListener("click", () => {
+      setDownloadCenterCollapsed(false);
+    });
+  }
+
+  window.addEventListener("scroll", syncFloatingDownloadCenter, { passive: true });
+  window.addEventListener("resize", syncFloatingDownloadCenter);
 
   els.selectAll.addEventListener("change", () => {
     document.querySelectorAll(".row-selector").forEach((checkbox) => {
@@ -104,11 +168,21 @@ function wireEvents() {
   });
 
   els.downloadRoot.addEventListener("input", () => {
-    els.heroDownloadRoot.textContent = els.downloadRoot.value.trim() || "./downloads";
+    const value = els.downloadRoot.value.trim() || "./downloads";
+    els.heroDownloadRoot.textContent = value;
+    persistDownloadRoot(value);
+    if (!state.downloadJob) {
+      renderDownloadJob();
+    }
+    renderPendingQueue();
   });
 }
 
 async function loadDocs() {
+  if (!els.docsGrid) {
+    return;
+  }
+
   const response = await api("/api/docs");
   state.docs = response.docs || [];
   renderDocs();
@@ -123,6 +197,7 @@ async function refreshStatus() {
   });
   renderSession();
   renderCandidates();
+  renderPendingQueue();
 
   if (state.downloadJob && isDownloadActive()) {
     startDownloadPolling(state.downloadJob.id);
@@ -133,8 +208,12 @@ async function refreshStatus() {
     await refreshMedia(false);
   } else {
     state.media = [];
+    state.pendingQueue = [];
     clearPreview();
     renderMedia();
+    renderPendingQueue();
+    renderDownloadJob();
+    redirectToHome();
   }
 }
 
@@ -158,6 +237,7 @@ async function connectCamera() {
     serialSuffix: els.serialSuffix.value.trim()
   };
 
+  persistDownloadRoot(els.downloadRoot.value.trim() || "./downloads");
   appendLog("Connecting to GoPro over USB...");
 
   const response = await api("/api/connect", {
@@ -184,10 +264,14 @@ async function disconnectCamera() {
 
   state.session = null;
   state.media = [];
+  state.pendingQueue = [];
   clearPreview();
   renderSession();
   renderMedia();
+  renderPendingQueue();
+  renderDownloadJob();
   appendLog("Disconnected from the GoPro session.");
+  redirectToHome();
 }
 
 async function refreshMedia(logResult = true) {
@@ -208,51 +292,159 @@ async function refreshMedia(logResult = true) {
   }
 }
 
-async function downloadSelected() {
+async function queueSelected() {
   const selected = getSelectedFiles();
   if (!selected.length) {
     appendLog("Select at least one file first.");
     return;
   }
 
-  await downloadFiles(selected);
+  await addFilesToQueue(selected, "selection");
 }
 
-async function downloadFiles(files) {
+async function startPendingQueueDownload() {
   if (!state.session) {
     appendLog("Connect to a GoPro first.");
     return;
   }
 
   if (isDownloadActive()) {
-    appendLog("A download is already running.");
+    appendLog("Finish the current batch before starting the next queue.");
     return;
   }
 
-  if (!files.length) {
-    appendLog("There are no files to download yet.");
+  if (!state.pendingQueue.length) {
+    appendLog("Queue at least one file before starting the download.");
     return;
   }
 
-  appendLog(`Starting download for ${files.length} file${files.length === 1 ? "" : "s"}...`);
+  const batch = state.pendingQueue.map((item) => ({ ...item }));
+  appendLog(`Starting queue with ${batch.length} file${batch.length === 1 ? "" : "s"}...`);
 
   const response = await api("/api/download-jobs", {
     method: "POST",
     body: {
       downloadRoot: els.downloadRoot.value.trim(),
-      files: files.map((file) => ({
-        directory: file.directory,
-        name: file.name,
-        sizeBytes: file.sizeBytes
+      files: batch.map((item) => ({
+        directory: item.directory,
+        name: item.name,
+        sizeBytes: item.sizeBytes
       }))
     }
   });
 
+  state.pendingQueue = [];
   setDownloadJob(response.job, {
     logTransitions: false
   });
+  renderPendingQueue();
   renderDownloadJob();
   startDownloadPolling(response.job.id);
+}
+
+async function addFilesToQueue(files, sourceLabel) {
+  if (!state.session) {
+    appendLog("Connect to a GoPro first.");
+    return;
+  }
+
+  if (!files.length) {
+    appendLog("There are no files to queue yet.");
+    return;
+  }
+
+  let added = 0;
+  let skipped = 0;
+
+  for (const file of files) {
+    if (!file || !file.path) {
+      skipped += 1;
+      continue;
+    }
+
+    if (isQueuedOrActive(file.path)) {
+      skipped += 1;
+      continue;
+    }
+
+    state.queueSequence += 1;
+    state.pendingQueue.push(createQueueItem(file, state.queueSequence));
+    added += 1;
+  }
+
+  renderPendingQueue();
+  renderDownloadJob();
+
+  if (added) {
+    appendLog(`Added ${added} file${added === 1 ? "" : "s"} to the ${sourceLabel === "preview" ? "preview" : "download"} queue.`);
+  }
+  if (skipped) {
+    appendLog(`Skipped ${skipped} file${skipped === 1 ? "" : "s"} that were already queued or already part of the active batch.`);
+  }
+}
+
+function createQueueItem(file, sequence) {
+  return {
+    id: `queue-${sequence}`,
+    path: file.path,
+    directory: file.directory,
+    name: file.name,
+    sizeBytes: Number(file.sizeBytes || 0),
+    type: file.type,
+    createdUnix: Number(file.createdUnix || 0)
+  };
+}
+
+function isQueuedOrActive(filePath) {
+  return state.pendingQueue.some((item) => item.path === filePath) || isPathInActiveJob(filePath);
+}
+
+function isPathInActiveJob(filePath) {
+  if (!state.downloadJob || !isDownloadActive()) {
+    return false;
+  }
+
+  return (state.downloadJob.files || []).some((item) => `${item.directory}/${item.name}` === filePath);
+}
+
+function clearPendingQueue() {
+  if (!state.pendingQueue.length) {
+    return;
+  }
+
+  const removedCount = state.pendingQueue.length;
+  state.pendingQueue = [];
+  renderPendingQueue();
+  renderDownloadJob();
+  appendLog(`Cleared ${removedCount} queued file${removedCount === 1 ? "" : "s"}.`);
+}
+
+function removeQueueItem(itemId) {
+  const before = state.pendingQueue.length;
+  state.pendingQueue = state.pendingQueue.filter((item) => item.id !== itemId);
+  if (state.pendingQueue.length !== before) {
+    renderPendingQueue();
+    renderDownloadJob();
+  }
+}
+
+function moveQueueItem(itemId, direction) {
+  const index = state.pendingQueue.findIndex((item) => item.id === itemId);
+  if (index < 0) {
+    return;
+  }
+
+  const targetIndex = index + direction;
+  if (targetIndex < 0 || targetIndex >= state.pendingQueue.length) {
+    return;
+  }
+
+  const nextQueue = [...state.pendingQueue];
+  const [item] = nextQueue.splice(index, 1);
+  nextQueue.splice(targetIndex, 0, item);
+  state.pendingQueue = nextQueue;
+  renderPendingQueue();
+  renderDownloadJob();
 }
 
 async function pollDownloadJob(jobId) {
@@ -285,6 +477,7 @@ function setDownloadJob(job, options = {}) {
   const previousStatus = state.downloadJob ? state.downloadJob.status : null;
   state.downloadJob = job;
   renderDownloadJob();
+  renderPendingQueue();
 
   if (!job || !options.logTransitions || previousStatus === job.status) {
     return;
@@ -373,6 +566,10 @@ function getSelectedFiles() {
 }
 
 function renderDocs() {
+  if (!els.docsGrid) {
+    return;
+  }
+
   els.docsGrid.innerHTML = "";
 
   for (const doc of state.docs) {
@@ -387,6 +584,10 @@ function renderDocs() {
 }
 
 function renderCandidates() {
+  if (!els.candidateList) {
+    return;
+  }
+
   if (!state.candidates.length) {
     els.candidateList.innerHTML = `<div class="candidate-empty">No likely USB candidate detected yet.</div>`;
     return;
@@ -402,7 +603,9 @@ function renderCandidates() {
       <span>${escapeHtml(candidate.hostAddress)} via ${escapeHtml(candidate.source)}</span>
     `;
     button.addEventListener("click", () => {
-      els.cameraIp.value = candidate.ip;
+      if (els.cameraIp) {
+        els.cameraIp.value = candidate.ip;
+      }
       appendLog(`Filled camera IP with detected candidate ${candidate.ip}.`);
     });
     els.candidateList.appendChild(button);
@@ -413,7 +616,9 @@ function renderSession() {
   els.heroDownloadRoot.textContent = els.downloadRoot.value.trim() || "./downloads";
 
   if (!state.session) {
-    els.sessionSummary.innerHTML = "No active session.";
+    if (els.sessionSummary) {
+      els.sessionSummary.innerHTML = "No active session.";
+    }
     els.heroConnection.textContent = "Not connected";
     els.heroMediaCount.textContent = `${state.media.length} files`;
     return;
@@ -422,15 +627,17 @@ function renderSession() {
   els.heroConnection.textContent = state.session.cameraName || state.session.ip;
   els.heroMediaCount.textContent = `${state.media.length} file${state.media.length === 1 ? "" : "s"}`;
 
-  els.sessionSummary.innerHTML = `
-    <div class="session-line"><strong>Target:</strong> ${escapeHtml(state.session.ip)}</div>
-    <div class="session-line"><strong>Source:</strong> ${escapeHtml(state.session.source || "Unknown")}</div>
-    <div class="session-line"><strong>Name:</strong> ${escapeHtml(state.session.cameraName || "Unknown")}</div>
-    <div class="session-line"><strong>Version:</strong> ${escapeHtml(state.session.version || "Unknown")}</div>
-    <div class="session-line"><strong>Connected:</strong> ${formatTimestamp(state.session.connectedAt)}</div>
-    <div class="session-line"><strong>Keep alive:</strong> ${state.session.lastKeepAliveError ? escapeHtml(state.session.lastKeepAliveError) : "Healthy"}</div>
-    ${state.session.controlWarning ? `<div class="session-line warning"><strong>Control note:</strong> ${escapeHtml(state.session.controlWarning)}</div>` : ""}
-  `;
+  if (els.sessionSummary) {
+    els.sessionSummary.innerHTML = `
+      <div class="session-line"><strong>Target:</strong> ${escapeHtml(state.session.ip)}</div>
+      <div class="session-line"><strong>Source:</strong> ${escapeHtml(state.session.source || "Unknown")}</div>
+      <div class="session-line"><strong>Name:</strong> ${escapeHtml(state.session.cameraName || "Unknown")}</div>
+      <div class="session-line"><strong>Version:</strong> ${escapeHtml(state.session.version || "Unknown")}</div>
+      <div class="session-line"><strong>Connected:</strong> ${formatTimestamp(state.session.connectedAt)}</div>
+      <div class="session-line"><strong>Keep alive:</strong> ${state.session.lastKeepAliveError ? escapeHtml(state.session.lastKeepAliveError) : "Healthy"}</div>
+      ${state.session.controlWarning ? `<div class="session-line warning"><strong>Control note:</strong> ${escapeHtml(state.session.controlWarning)}</div>` : ""}
+    `;
+  }
 }
 
 function renderMedia() {
@@ -478,8 +685,7 @@ function renderMedia() {
 
 function renderPreview() {
   const preview = state.preview;
-  const isDownloadBusy = isDownloadActive();
-  els.previewDownloadBtn.disabled = !preview.file || isDownloadBusy;
+  els.previewDownloadBtn.disabled = !preview.file;
 
   if (!preview.file) {
     els.previewTitle.textContent = "Select a file";
@@ -552,45 +758,303 @@ function renderPreview() {
 function renderDownloadJob() {
   const job = state.downloadJob;
   const active = isDownloadActive();
+  const queuedCount = state.pendingQueue.length;
+  const queuedBytes = state.pendingQueue.reduce((sum, item) => sum + Number(item.sizeBytes || 0), 0);
+  const downloadRoot = els.downloadRoot.value.trim() || "./downloads";
+  const nextQueuedItem = state.pendingQueue[0] || null;
 
-  els.downloadSelectedBtn.disabled = active;
-  els.downloadAllBtn.disabled = active;
   els.disconnectBtn.disabled = active;
-  els.previewDownloadBtn.disabled = active || !state.preview.file;
+  els.startQueueBtn.disabled = active || !queuedCount || !state.session;
+  els.clearQueueBtn.disabled = !queuedCount;
 
   if (!job) {
     els.downloadStatusCard.className = "download-status-card is-idle";
-    els.downloadHeadline.textContent = "No active download.";
+    els.downloadBadge.className = `download-badge ${queuedCount ? "is-ready" : "is-idle"}`;
+    els.downloadBadge.textContent = queuedCount ? "Ready" : "Idle";
+    els.downloadHeadline.textContent = queuedCount ? `Queue ready for ${queuedCount} file${queuedCount === 1 ? "" : "s"}.` : "No active download.";
+    els.downloadInlineMeta.textContent = queuedCount ? `${formatBytes(queuedBytes)} waiting for the next batch.` : "Queue files to get started.";
+    els.statTotalFiles.textContent = String(queuedCount);
+    els.statCompletedFiles.textContent = "0";
+    els.statTransferred.textContent = "0 B";
+    els.statDownloadRoot.textContent = downloadRoot;
     els.overallProgressFill.style.width = "0%";
     els.currentProgressFill.style.width = "0%";
     els.overallProgressText.textContent = "0 B of 0 B";
     els.currentProgressText.textContent = "Waiting for a download to start";
-    els.downloadSummary.textContent = "Preview a file first if you want to check the low-res version before offloading it.";
+    els.currentFileName.textContent = nextQueuedItem ? nextQueuedItem.name : "Nothing downloading";
+    els.currentFileMeta.textContent = queuedCount
+      ? "The queue is staged. Start the batch whenever you are ready."
+      : "Build a queue, reorder it if needed, then start the batch when you are ready.";
+    els.activeJobList.innerHTML = `<div class="job-list-empty">${queuedCount ? "No batch is running yet. Start the queue to begin downloading." : "No active batch yet."}</div>`;
+    els.downloadSummary.textContent = queuedCount
+      ? `Ready to save ${formatBytes(queuedBytes)} into ${downloadRoot}.`
+      : "Preview a file first if you want to check the low-res version before offloading it.";
+
+    renderFoldedDownloadBar({
+      status: queuedCount ? "Ready" : "Idle",
+      fileName: nextQueuedItem ? nextQueuedItem.name : "Nothing downloading",
+      fileMeta: nextQueuedItem
+        ? joinCompactParts([
+            `${formatBytes(nextQueuedItem.sizeBytes)} first up`,
+            `${formatBytes(queuedBytes)} total queued`,
+            downloadRoot
+          ])
+        : "Queue files to get started.",
+      downloaded: queuedCount ? `0 B of ${formatBytes(queuedBytes)}` : "0 B of 0 B",
+      completed: `0 / ${queuedCount}`,
+      speed: "--",
+      eta: queuedCount ? "Ready" : "--"
+    });
     return;
   }
 
   els.downloadStatusCard.className = `download-status-card is-${job.status}`;
+  els.downloadBadge.className = `download-badge is-${job.status}`;
+  els.downloadBadge.textContent = formatJobBadge(job.status);
+  els.statTotalFiles.textContent = String(job.totalFiles);
+  els.statCompletedFiles.textContent = String(job.completedFiles);
+  els.statTransferred.textContent = formatBytes(job.transferredBytes);
+  els.statDownloadRoot.textContent = job.downloadRoot;
+  els.overallProgressFill.style.width = `${job.overallPercent || 0}%`;
+  els.overallProgressText.textContent = `${formatBytes(job.transferredBytes)} of ${formatBytes(job.totalBytes)}${job.overallPercent !== null ? ` (${job.overallPercent}%)` : ""}`;
+
+  let foldedFileName = "Waiting for the next file";
+  let foldedFileMeta = joinCompactParts([
+    `${formatBytes(job.transferredBytes)} downloaded`,
+    `${formatBytes(job.totalBytes)} total`
+  ]);
+
+  if (job.currentItem) {
+    els.currentProgressFill.style.width = `${job.currentItem.percent || 0}%`;
+    els.currentProgressText.textContent = `${job.currentItem.name}: ${formatBytes(job.currentItem.downloadedBytes)} of ${formatBytes(job.currentItem.sizeBytes)}${job.currentItem.percent !== null ? ` (${job.currentItem.percent}%)` : ""}`;
+    els.currentFileName.textContent = job.currentItem.name;
+    els.currentFileMeta.textContent = joinCompactParts([
+      job.currentItem.directory,
+      `${formatBytes(job.currentItem.downloadedBytes)} of ${formatBytes(job.currentItem.sizeBytes)}`,
+      formatTransferRate(job.speedBytesPerSecond),
+      `ETA ${formatEta(job.currentItem.etaSeconds, job.status)}`
+    ]);
+    foldedFileName = job.currentItem.name;
+    foldedFileMeta = joinCompactParts([
+      `${formatBytes(job.currentItem.downloadedBytes)} of ${formatBytes(job.currentItem.sizeBytes)}`,
+      job.currentItem.percent !== null ? `${job.currentItem.percent}%` : "",
+      job.currentItem.directory
+    ]);
+  } else {
+    els.currentProgressFill.style.width = job.status === "completed" ? "100%" : "0%";
+    els.currentProgressText.textContent = job.status === "completed" ? "All files finished." : "Waiting for the next file.";
+    els.currentFileName.textContent = job.status === "completed" ? "Batch finished" : "Waiting for the next file";
+    els.currentFileMeta.textContent = job.status === "failed" ? (job.error || "The active batch hit an error.") : "No file is actively transferring right now.";
+
+    if (job.status === "completed") {
+      foldedFileName = "Batch finished";
+      foldedFileMeta = `Saved ${job.completedFiles} file${job.completedFiles === 1 ? "" : "s"} to ${job.downloadRoot}`;
+    } else if (job.status === "failed") {
+      foldedFileName = "Download failed";
+      foldedFileMeta = job.error || "The active batch hit an error.";
+    }
+  }
+
+  if (job.status === "running" || job.status === "queued") {
+    els.downloadHeadline.textContent = `Downloading ${job.completedFiles} of ${job.totalFiles} files`;
+    els.downloadInlineMeta.textContent = joinCompactParts([
+      `Saving into ${job.downloadRoot}`,
+      formatTransferRate(job.speedBytesPerSecond),
+      `ETA ${formatEta(job.etaSeconds, job.status)}`
+    ]);
+    els.downloadSummary.textContent = `Files are being saved to ${job.downloadRoot}. You can keep building the next queue while this batch runs.`;
+  } else if (job.status === "completed") {
+    els.downloadHeadline.textContent = "Download complete";
+    els.downloadInlineMeta.textContent = `Finished at ${formatTimestamp(job.finishedAt)}`;
+    els.downloadSummary.textContent = `Saved ${job.completedFiles} file${job.completedFiles === 1 ? "" : "s"} to ${job.downloadRoot}.`;
+  } else if (job.status === "failed") {
+    els.downloadHeadline.textContent = "Download failed";
+    els.downloadInlineMeta.textContent = `Stopped while saving into ${job.downloadRoot}`;
+    els.downloadSummary.textContent = job.error || "The GoPro stopped responding during the transfer.";
+  }
+
+  renderFoldedDownloadBar({
+    status: formatJobBadge(job.status),
+    fileName: foldedFileName,
+    fileMeta: foldedFileMeta,
+    downloaded: `${formatBytes(job.transferredBytes)} of ${formatBytes(job.totalBytes)}`,
+    completed: `${job.completedFiles} / ${job.totalFiles}`,
+    speed: formatTransferRate(job.speedBytesPerSecond),
+    eta: formatEta(job.etaSeconds, job.status)
+  });
+  renderActiveJobList(job);
+}
+
+function renderDownloadJobLegacy() {
+  const job = state.downloadJob;
+  const active = isDownloadActive();
+  const queuedCount = state.pendingQueue.length;
+  const queuedBytes = state.pendingQueue.reduce((sum, item) => sum + Number(item.sizeBytes || 0), 0);
+  const downloadRoot = els.downloadRoot.value.trim() || "./downloads";
+
+  els.disconnectBtn.disabled = active;
+  els.startQueueBtn.disabled = active || !queuedCount || !state.session;
+  els.clearQueueBtn.disabled = !queuedCount;
+
+  if (!job) {
+    els.downloadStatusCard.className = "download-status-card is-idle";
+    els.downloadBadge.className = `download-badge ${queuedCount ? "is-ready" : "is-idle"}`;
+    els.downloadBadge.textContent = queuedCount ? "Ready" : "Idle";
+    els.downloadHeadline.textContent = queuedCount ? `Queue ready for ${queuedCount} file${queuedCount === 1 ? "" : "s"}.` : "No active download.";
+    els.downloadInlineMeta.textContent = queuedCount ? `${formatBytes(queuedBytes)} waiting for the next batch.` : "Queue files to get started.";
+    els.statTotalFiles.textContent = String(queuedCount);
+    els.statCompletedFiles.textContent = "0";
+    els.statTransferred.textContent = "0 B";
+    els.statDownloadRoot.textContent = downloadRoot;
+    els.overallProgressFill.style.width = "0%";
+    els.currentProgressFill.style.width = "0%";
+    els.overallProgressText.textContent = "0 B of 0 B";
+    els.currentProgressText.textContent = "Waiting for a download to start";
+    els.currentFileName.textContent = queuedCount ? state.pendingQueue[0].name : "Nothing downloading";
+    els.currentFileMeta.textContent = queuedCount
+      ? "The queue is staged. Start the batch whenever you are ready."
+      : "Build a queue, reorder it if needed, then start the batch when you are ready.";
+    els.activeJobList.innerHTML = `<div class="job-list-empty">${queuedCount ? "No batch is running yet. Start the queue to begin downloading." : "No active batch yet."}</div>`;
+    els.downloadSummary.textContent = queuedCount
+      ? `Ready to save ${formatBytes(queuedBytes)} into ${downloadRoot}.`
+      : "Preview a file first if you want to check the low-res version before offloading it.";
+    return;
+  }
+
+  els.downloadStatusCard.className = `download-status-card is-${job.status}`;
+  els.downloadBadge.className = `download-badge is-${job.status}`;
+  els.downloadBadge.textContent = formatJobBadge(job.status);
+  els.statTotalFiles.textContent = String(job.totalFiles);
+  els.statCompletedFiles.textContent = String(job.completedFiles);
+  els.statTransferred.textContent = formatBytes(job.transferredBytes);
+  els.statDownloadRoot.textContent = job.downloadRoot;
   els.overallProgressFill.style.width = `${job.overallPercent || 0}%`;
   els.overallProgressText.textContent = `${formatBytes(job.transferredBytes)} of ${formatBytes(job.totalBytes)}${job.overallPercent !== null ? ` (${job.overallPercent}%)` : ""}`;
 
   if (job.currentItem) {
     els.currentProgressFill.style.width = `${job.currentItem.percent || 0}%`;
     els.currentProgressText.textContent = `${job.currentItem.name}: ${formatBytes(job.currentItem.downloadedBytes)} of ${formatBytes(job.currentItem.sizeBytes)}${job.currentItem.percent !== null ? ` (${job.currentItem.percent}%)` : ""}`;
+    els.currentFileName.textContent = job.currentItem.name;
+    els.currentFileMeta.textContent = `${job.currentItem.directory} · ${formatBytes(job.currentItem.downloadedBytes)} downloaded of ${formatBytes(job.currentItem.sizeBytes)}`;
   } else {
     els.currentProgressFill.style.width = job.status === "completed" ? "100%" : "0%";
     els.currentProgressText.textContent = job.status === "completed" ? "All files finished." : "Waiting for the next file.";
+    els.currentFileName.textContent = job.status === "completed" ? "Batch finished" : "Waiting for the next file";
+    els.currentFileMeta.textContent = job.status === "failed" ? (job.error || "The active batch hit an error.") : "No file is actively transferring right now.";
   }
 
   if (job.status === "running" || job.status === "queued") {
     els.downloadHeadline.textContent = `Downloading ${job.completedFiles} of ${job.totalFiles} files`;
-    els.downloadSummary.textContent = `Files are being saved to ${job.downloadRoot}.`;
+    els.downloadInlineMeta.textContent = `Saving into ${job.downloadRoot}`;
+    els.downloadSummary.textContent = `Files are being saved to ${job.downloadRoot}. You can keep building the next queue while this batch runs.`;
   } else if (job.status === "completed") {
-    els.downloadHeadline.textContent = `Download complete`;
+    els.downloadHeadline.textContent = "Download complete";
+    els.downloadInlineMeta.textContent = `Finished at ${formatTimestamp(job.finishedAt)}`;
     els.downloadSummary.textContent = `Saved ${job.completedFiles} file${job.completedFiles === 1 ? "" : "s"} to ${job.downloadRoot}.`;
   } else if (job.status === "failed") {
-    els.downloadHeadline.textContent = `Download failed`;
+    els.downloadHeadline.textContent = "Download failed";
+    els.downloadInlineMeta.textContent = `Stopped while saving into ${job.downloadRoot}`;
     els.downloadSummary.textContent = job.error || "The GoPro stopped responding during the transfer.";
   }
+
+  renderActiveJobList(job);
+}
+
+function renderPendingQueue() {
+  const count = state.pendingQueue.length;
+  const totalBytes = state.pendingQueue.reduce((sum, item) => sum + Number(item.sizeBytes || 0), 0);
+  const active = isDownloadActive();
+
+  els.queueCountPill.textContent = `${count} queued`;
+  els.queueTitle.textContent = count ? `${count} file${count === 1 ? "" : "s"} ready` : "No files queued";
+  els.queueSummary.textContent = count
+    ? `${formatBytes(totalBytes)} across ${count} file${count === 1 ? "" : "s"}. ${active ? "This queue will wait for the active batch to finish." : "Reorder or remove anything before you start."}`
+    : "Add files from the footage browser or the preview panel to build a batch before downloading.";
+
+  els.startQueueBtn.disabled = active || !count || !state.session;
+  els.clearQueueBtn.disabled = !count;
+
+  if (!count) {
+    els.queueList.innerHTML = `<div class="queue-empty">No pending queue yet. Use “Queue selected”, “Queue all”, or “Add to queue” from preview.</div>`;
+    return;
+  }
+
+  els.queueList.innerHTML = state.pendingQueue
+    .map((item, index) => `
+      <article class="queue-item-card">
+        <div class="queue-item-order">${index + 1}</div>
+        <div class="queue-item-main">
+          <div class="queue-item-title-row">
+            <strong>${escapeHtml(item.name)}</strong>
+            <span class="queue-item-badge">${escapeHtml(item.type || "Media")}</span>
+          </div>
+          <div class="queue-item-meta">${escapeHtml(item.directory)} · ${formatBytes(item.sizeBytes)}${item.createdUnix ? ` · ${formatUnix(item.createdUnix)}` : ""}</div>
+        </div>
+        <div class="queue-item-actions">
+          <button class="ghost-button queue-action" type="button" data-action="up" data-id="${escapeHtml(item.id)}" ${index === 0 ? "disabled" : ""}>Up</button>
+          <button class="ghost-button queue-action" type="button" data-action="down" data-id="${escapeHtml(item.id)}" ${index === state.pendingQueue.length - 1 ? "disabled" : ""}>Down</button>
+          <button class="ghost-button queue-action queue-action-danger" type="button" data-action="remove" data-id="${escapeHtml(item.id)}">Remove</button>
+        </div>
+      </article>
+    `)
+    .join("");
+
+  document.querySelectorAll(".queue-action").forEach((button) => {
+    button.addEventListener("click", () => {
+      const itemId = button.dataset.id;
+      const action = button.dataset.action;
+
+      if (action === "remove") {
+        removeQueueItem(itemId);
+      } else if (action === "up") {
+        moveQueueItem(itemId, -1);
+      } else if (action === "down") {
+        moveQueueItem(itemId, 1);
+      }
+    });
+  });
+}
+
+function renderActiveJobList(job) {
+  if (!job || !(job.files || []).length) {
+    els.activeJobList.innerHTML = `<div class="job-list-empty">No batch details yet.</div>`;
+    return;
+  }
+
+  els.activeJobList.innerHTML = job.files
+    .map((item) => {
+      const percent = item.status === "completed" ? 100 : item.status === "running" ? (item.sizeBytes ? Math.max(1, Number(((item.downloadedBytes / item.sizeBytes) * 100).toFixed(1))) : null) : 0;
+      return `
+        <div class="job-file-row is-${escapeHtml(item.status)}">
+          <div class="job-file-main">
+            <div class="job-file-title-row">
+              <strong>${escapeHtml(item.name)}</strong>
+              <span class="job-file-badge is-${escapeHtml(item.status)}">${escapeHtml(formatJobBadge(item.status))}</span>
+            </div>
+            <div class="job-file-meta">${escapeHtml(item.directory)} · ${formatBytes(item.downloadedBytes)} of ${formatBytes(item.sizeBytes)}</div>
+            ${item.status === "running" ? `
+              <div class="job-file-progress">
+                <div class="job-file-progress-fill" style="width:${percent || 0}%"></div>
+              </div>
+            ` : ""}
+            ${item.error ? `<div class="job-file-error">${escapeHtml(item.error)}</div>` : ""}
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function formatJobBadge(status) {
+  return (
+    {
+      idle: "Idle",
+      queued: "Queued",
+      running: "Running",
+      completed: "Completed",
+      failed: "Failed"
+    }[status] || "Unknown"
+  );
 }
 
 function isDownloadActive() {
@@ -769,6 +1233,108 @@ function appendLog(message) {
   els.activityLog.prepend(line);
 }
 
+function renderFoldedDownloadBar(summary) {
+  if (!els.foldedFileName) {
+    return;
+  }
+
+  els.foldedFileName.textContent = summary.fileName;
+  els.foldedFileMeta.textContent = summary.fileMeta;
+  els.foldedStatus.textContent = summary.status;
+  els.foldedDownloaded.textContent = summary.downloaded;
+  els.foldedCompleted.textContent = summary.completed;
+  els.foldedSpeed.textContent = summary.speed;
+  els.foldedEta.textContent = summary.eta;
+}
+
+function setDownloadCenterCollapsed(collapsed) {
+  state.downloadCenterCollapsed = Boolean(collapsed);
+  renderDownloadCenterCollapsedState();
+
+  try {
+    window.localStorage.setItem(DOWNLOAD_CENTER_COLLAPSED_STORAGE_KEY, state.downloadCenterCollapsed ? "1" : "0");
+  } catch (error) {
+    // Ignore storage failures and continue with the active layout.
+  }
+}
+
+function renderDownloadCenterCollapsedState() {
+  if (els.downloadCenterShell) {
+    els.downloadCenterShell.classList.toggle("is-collapsed", state.downloadCenterCollapsed);
+  }
+
+  if (els.downloadCenterPanel) {
+    els.downloadCenterPanel.classList.toggle("is-floating-collapsed", state.downloadCenterCollapsed);
+  }
+
+  document.body.classList.toggle("has-floating-download-center", state.downloadCenterCollapsed);
+
+  if (els.downloadCenterToggle) {
+    els.downloadCenterToggle.textContent = state.downloadCenterCollapsed ? "Expand" : "Collapse";
+    els.downloadCenterToggle.setAttribute("aria-expanded", String(!state.downloadCenterCollapsed));
+  }
+
+  if (els.downloadCenterFloatingToggle) {
+    els.downloadCenterFloatingToggle.textContent = state.downloadCenterCollapsed ? "Expand" : "Collapse";
+  }
+
+  syncFloatingDownloadCenter();
+}
+
+function restoreDownloadCenterCollapsed() {
+  let storedValue = "";
+
+  try {
+    storedValue = window.localStorage.getItem(DOWNLOAD_CENTER_COLLAPSED_STORAGE_KEY) || "";
+  } catch (error) {
+    storedValue = "";
+  }
+
+  state.downloadCenterCollapsed = storedValue === "1";
+  renderDownloadCenterCollapsedState();
+}
+
+function syncFloatingDownloadCenter() {
+  if (!els.downloadCenterShell || !els.downloadCenterPanel) {
+    return;
+  }
+
+  const panelTop = els.downloadCenterPanel.getBoundingClientRect().top;
+  const shouldFollow = state.downloadCenterCollapsed && panelTop <= 18;
+  state.downloadCenterFollowing = shouldFollow;
+
+  els.downloadCenterShell.classList.toggle("is-following", shouldFollow);
+  document.body.classList.toggle("has-floating-download-center", shouldFollow);
+}
+
+function persistDownloadRoot(value) {
+  try {
+    window.localStorage.setItem(DOWNLOAD_ROOT_STORAGE_KEY, value);
+  } catch (error) {
+    // Ignore storage failures and continue with the active session.
+  }
+}
+
+function restoreDownloadRoot() {
+  let storedValue = "";
+
+  try {
+    storedValue = window.localStorage.getItem(DOWNLOAD_ROOT_STORAGE_KEY) || "";
+  } catch (error) {
+    storedValue = "";
+  }
+
+  if (storedValue) {
+    els.downloadRoot.value = storedValue;
+  }
+
+  els.heroDownloadRoot.textContent = els.downloadRoot.value.trim() || "./downloads";
+}
+
+function redirectToHome() {
+  window.location.replace("/");
+}
+
 async function runUiTask(task) {
   try {
     await task();
@@ -806,6 +1372,10 @@ async function readErrorMessage(response) {
   return text || `Request failed with HTTP ${response.status}.`;
 }
 
+function joinCompactParts(parts) {
+  return parts.filter((part) => Boolean(part) && part !== "--").join(" | ");
+}
+
 function formatBytes(bytes) {
   const value = Number(bytes || 0);
   if (!value) {
@@ -822,6 +1392,51 @@ function formatBytes(bytes) {
   }
 
   return `${size.toFixed(size >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+function formatTransferRate(bytesPerSecond) {
+  if (bytesPerSecond === null || bytesPerSecond === undefined) {
+    return "--";
+  }
+
+  return `${formatBytes(bytesPerSecond)}/s`;
+}
+
+function formatEta(seconds, status = "running") {
+  if (status === "completed") {
+    return "Done";
+  }
+
+  if (status === "failed") {
+    return "Stopped";
+  }
+
+  if (status === "queued") {
+    return "Waiting";
+  }
+
+  if (seconds === null || seconds === undefined) {
+    return "Calculating...";
+  }
+
+  return formatDuration(seconds);
+}
+
+function formatDuration(seconds) {
+  const totalSeconds = Math.max(0, Math.round(Number(seconds || 0)));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const remainingSeconds = totalSeconds % 60;
+
+  if (hours) {
+    return `${hours}h ${minutes}m`;
+  }
+
+  if (minutes) {
+    return `${minutes}m ${remainingSeconds}s`;
+  }
+
+  return `${remainingSeconds}s`;
 }
 
 function formatUnix(unixSeconds) {

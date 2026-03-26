@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>GoPro USB Footage App</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Open GoPro USB Offload</p>
+          <h1>Browse and download GoPro footage over USB-C from your PC.</h1>
+          <p class="hero-text">
+            This app follows the official Open GoPro USB flow: connect over the GoPro USB network link,
+            enable wired control, keep the camera awake, then list and offload media from the SD card.
+          </p>
+        </div>
+        <div class="hero-card">
+          <div class="hero-stat">
+            <span class="hero-label">Connection</span>
+            <strong id="hero-connection">Not connected</strong>
+          </div>
+          <div class="hero-stat">
+            <span class="hero-label">Download folder</span>
+            <strong id="hero-download-root">./downloads</strong>
+          </div>
+          <div class="hero-stat">
+            <span class="hero-label">Media loaded</span>
+            <strong id="hero-media-count">0 files</strong>
+          </div>
+          <div class="hero-actions">
+            <a class="link-pill" href="/">Home</a>
+            <button id="disconnect-btn" class="ghost-button" type="button">Disconnect</button>
+          </div>
+          <input id="download-root" type="hidden" value="./downloads">
+        </div>
+      </header>
+
+      <main class="layout">
+        <section id="download-center-panel" class="panel panel-wide download-panel">
+          <div class="panel-header">
+            <h2>Download Center</h2>
+            <div class="download-panel-actions">
+              <div class="download-pill-row">
+                <span id="download-badge" class="download-badge is-idle">Idle</span>
+                <span id="queue-count-pill" class="download-pill">0 queued</span>
+              </div>
+              <button
+                id="download-center-toggle"
+                class="ghost-button download-toggle"
+                type="button"
+                aria-expanded="true"
+                aria-controls="download-center-shell"
+              >
+                Collapse
+              </button>
+            </div>
+          </div>
+          <div id="download-center-shell" class="download-center">
+            <div id="download-status-card" class="download-status-card is-idle">
+              <div class="download-folded-bar">
+                <div class="download-folded-primary">
+                  <div class="subheading">Download Bar</div>
+                  <div class="download-folded-title" id="folded-file-name">Nothing downloading</div>
+                  <div class="download-folded-copy" id="folded-file-meta">Queue files to get started.</div>
+                </div>
+                <div class="download-folded-stats">
+                  <article class="download-mini-stat">
+                    <span>Status</span>
+                    <strong id="folded-status">Idle</strong>
+                  </article>
+                  <article class="download-mini-stat">
+                    <span>Downloaded</span>
+                    <strong id="folded-downloaded">0 B of 0 B</strong>
+                  </article>
+                  <article class="download-mini-stat">
+                    <span>Completed</span>
+                    <strong id="folded-completed">0 / 0</strong>
+                  </article>
+                  <article class="download-mini-stat">
+                    <span>Speed</span>
+                    <strong id="folded-speed">--</strong>
+                  </article>
+                  <article class="download-mini-stat">
+                    <span>ETA</span>
+                    <strong id="folded-eta">--</strong>
+                  </article>
+                </div>
+                <button
+                  id="download-center-floating-toggle"
+                  class="ghost-button download-floating-toggle"
+                  type="button"
+                >
+                  Expand
+                </button>
+              </div>
+
+              <div class="download-expanded-body">
+                <div class="download-headline-row">
+                  <div>
+                    <div class="subheading">Current Transfer</div>
+                    <div class="download-headline" id="download-headline">No active download.</div>
+                  </div>
+                  <div class="download-inline-meta" id="download-inline-meta">Queue files to get started.</div>
+                </div>
+
+                <div class="download-stat-grid">
+                  <article class="download-stat-card">
+                    <span>Batch files</span>
+                    <strong id="stat-total-files">0</strong>
+                  </article>
+                  <article class="download-stat-card">
+                    <span>Completed</span>
+                    <strong id="stat-completed-files">0</strong>
+                  </article>
+                  <article class="download-stat-card">
+                    <span>Transferred</span>
+                    <strong id="stat-transferred">0 B</strong>
+                  </article>
+                  <article class="download-stat-card">
+                    <span>Download root</span>
+                    <strong id="stat-download-root">./downloads</strong>
+                  </article>
+                </div>
+
+                <div class="progress-block">
+                  <div class="progress-label-row">
+                    <span>Overall progress</span>
+                    <strong id="overall-progress-text">0 B of 0 B</strong>
+                  </div>
+                  <div class="progress-track">
+                    <div id="overall-progress-fill" class="progress-fill"></div>
+                  </div>
+                </div>
+
+                <div class="progress-block">
+                  <div class="progress-label-row">
+                    <span>Current file</span>
+                    <strong id="current-progress-text">Waiting for a download to start</strong>
+                  </div>
+                  <div class="progress-track">
+                    <div id="current-progress-fill" class="progress-fill"></div>
+                  </div>
+                </div>
+
+                <div class="download-detail-grid">
+                  <div class="download-detail-card">
+                    <div class="subheading">Current File Detail</div>
+                    <div class="download-detail-title" id="current-file-name">Nothing downloading</div>
+                    <div class="download-detail-copy" id="current-file-meta">
+                      Add files to the queue, reorder or remove them, then start the batch when you are ready.
+                    </div>
+                  </div>
+
+                  <div class="download-detail-card">
+                    <div class="subheading">Batch Activity</div>
+                    <div id="active-job-list" class="job-file-list"></div>
+                  </div>
+                </div>
+
+                <div id="download-summary" class="download-summary">
+                  Preview a file first if you want to check the low-res version before offloading it.
+                </div>
+              </div>
+            </div>
+
+            <div class="queue-panel">
+              <div class="queue-panel-header">
+                <div>
+                  <div class="subheading">Next Queue</div>
+                  <h3 id="queue-title">No files queued</h3>
+                </div>
+                <div class="button-row">
+                  <button id="start-queue-btn" class="primary-button" type="button">Start queue</button>
+                  <button id="clear-queue-btn" class="ghost-button" type="button">Clear queue</button>
+                </div>
+              </div>
+
+              <div id="queue-summary" class="queue-summary">
+                Add files from the footage browser or the preview panel to build a batch before downloading.
+              </div>
+
+              <div id="queue-list" class="queue-list"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel panel-wide">
+          <div class="panel-header">
+            <h2>Footage</h2>
+            <button id="refresh-media-btn" class="ghost-button" type="button">Refresh list</button>
+          </div>
+
+          <div class="media-workspace">
+            <div class="media-browser">
+              <div class="toolbar">
+                <label class="checkbox-line">
+                  <input id="select-all" type="checkbox">
+                  <span>Select all</span>
+                </label>
+                <button id="download-selected-btn" class="primary-button" type="button">Queue selected</button>
+                <button id="download-all-btn" class="ghost-button" type="button">Queue all</button>
+              </div>
+
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th></th>
+                      <th>Thumb</th>
+                      <th>Name</th>
+                      <th>Type</th>
+                      <th>Folder</th>
+                      <th>Size</th>
+                      <th>Created</th>
+                      <th>Preview</th>
+                    </tr>
+                  </thead>
+                  <tbody id="media-body">
+                    <tr>
+                      <td colspan="8" class="empty-state">Connect to a camera to load media.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <aside class="preview-pane">
+              <div class="preview-pane-header">
+                <div>
+                  <div class="subheading">Preview</div>
+                  <h3 id="preview-title">Select a file</h3>
+                </div>
+                <button id="preview-download-btn" class="primary-button" type="button">Add to queue</button>
+              </div>
+              <div id="preview-body" class="preview-body is-empty">
+                Choose a photo or video and click <strong>Preview</strong> to inspect a lightweight version before downloading.
+              </div>
+              <div id="preview-meta" class="preview-meta"></div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="panel panel-wide">
+          <div class="panel-header">
+            <h2>Activity</h2>
+          </div>
+          <div id="activity-log" class="activity-log"></div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>
