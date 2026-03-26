@@ -435,6 +435,24 @@ tbody tr.is-active-row {
   object-fit: contain;
 }
 
+.preview-video-shell {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.preview-video-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  gap: 10px;
+  place-content: center;
+  padding: 24px;
+  background: linear-gradient(180deg, rgba(10, 18, 32, 0.16) 0%, rgba(10, 18, 32, 0.5) 100%);
+  color: #fff;
+  text-align: center;
+}
+
 .preview-meta {
   display: grid;
   gap: 8px;

@@ -120,7 +120,7 @@ async function routeRequest(req, res) {
 
   if (pathname === "/api/media/preview" && req.method === "GET") {
     ensureConnected();
-    return proxyPreviewAsset(res, requestUrl.searchParams);
+    return proxyPreviewAsset(req, res, requestUrl.searchParams);
   }
 
   if (pathname === "/api/download" && req.method === "POST") {
@@ -590,10 +590,11 @@ function buildVideoSiblingCandidates(directory, filename, targetExtension) {
   return candidates;
 }
 
-async function proxyPreviewAsset(res, searchParams) {
+async function proxyPreviewAsset(req, res, searchParams) {
   const assetType = String(searchParams.get("assetType") || "").trim().toLowerCase();
   const directory = sanitizePathPart(searchParams.get("directory"), "100GOPRO");
   const name = sanitizePathPart(searchParams.get("name"), "media.bin");
+  const rangeHeader = typeof req.headers.range === "string" ? req.headers.range : null;
 
   if (!assetType) {
     throw new Error("Preview asset type is required.");
@@ -602,7 +603,8 @@ async function proxyPreviewAsset(res, searchParams) {
   if (assetType === "video") {
     const candidates = buildVideoPreviewCandidates(directory, name);
     const previewResponse = await tryMediaFileCandidates(state.session.ip, candidates, {
-      timeoutMs: 0
+      timeoutMs: 0,
+      headers: buildPreviewRequestHeaders(rangeHeader)
     });
 
     if (previewResponse) {
@@ -613,7 +615,8 @@ async function proxyPreviewAsset(res, searchParams) {
     }
 
     const sourceResponse = await goproGet(state.session.ip, buildMediaDownloadEndpoint(directory, name), {
-      timeoutMs: 0
+      timeoutMs: 0,
+      headers: buildPreviewRequestHeaders(rangeHeader)
     });
 
     return proxyBinaryResponse(res, sourceResponse, {
@@ -752,16 +755,18 @@ async function proxyBinaryResponse(res, response, options = {}) {
     "Cache-Control": "no-store"
   };
 
-  const contentLength = response.headers.get("content-length");
-  if (contentLength) {
-    headers["Content-Length"] = contentLength;
+  for (const headerName of ["content-length", "content-range", "accept-ranges"]) {
+    const headerValue = response.headers.get(headerName);
+    if (headerValue) {
+      headers[toHeaderCase(headerName)] = headerValue;
+    }
   }
 
   if (options.filename) {
     headers["Content-Disposition"] = `inline; filename="${sanitizePathPart(options.filename, "preview.bin")}"`;
   }
 
-  res.writeHead(200, headers);
+  res.writeHead(response.status || 200, headers);
   await pipeline(Readable.fromWeb(response.body), res);
 }
 
@@ -776,6 +781,23 @@ function isDirectPreviewableImage(filename) {
 
 function buildMediaDownloadEndpoint(directory, filename) {
   return `/videos/DCIM/${encodeURIComponent(directory)}/${encodeURIComponent(filename)}`;
+}
+
+function buildPreviewRequestHeaders(rangeHeader) {
+  if (!rangeHeader) {
+    return undefined;
+  }
+
+  return {
+    Range: rangeHeader
+  };
+}
+
+function toHeaderCase(headerName) {
+  return String(headerName)
+    .split("-")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join("-");
 }
 
 async function downloadMedia(options) {
@@ -1092,7 +1114,8 @@ async function goproGet(ip, pathname, options = {}) {
 
   try {
     const response = await fetch(requestUrl, {
-      method: "GET",
+      method: options.method || "GET",
+      headers: options.headers,
       signal: controller ? controller.signal : undefined
     });
 

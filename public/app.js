@@ -7,6 +7,7 @@ const state = {
     file: null,
     status: "idle",
     objectUrl: null,
+    streamUrl: null,
     error: null
   },
   downloadJob: null,
@@ -311,14 +312,22 @@ async function previewFile(filePath) {
     return;
   }
 
-  revokePreviewObjectUrl();
+  resetPreviewMediaState();
   state.preview = {
     file,
     status: "loading",
     objectUrl: null,
+    streamUrl: null,
     error: null
   };
   renderPreview();
+
+  if (file.preview.kind === "video") {
+    state.preview.streamUrl = buildPreviewStreamUrl(file.preview.url);
+    renderPreview();
+    appendLog(`Streaming preview for ${file.name}.`);
+    return;
+  }
 
   try {
     const response = await fetch(file.preview.url, {
@@ -334,6 +343,7 @@ async function previewFile(filePath) {
       file,
       status: "ready",
       objectUrl: URL.createObjectURL(blob),
+      streamUrl: null,
       error: null
     };
     renderPreview();
@@ -343,6 +353,7 @@ async function previewFile(filePath) {
       file,
       status: "error",
       objectUrl: null,
+      streamUrl: null,
       error: error instanceof Error ? error.message : String(error)
     };
     renderPreview();
@@ -474,15 +485,7 @@ function renderPreview() {
   const previewLabel = file.preview && file.preview.label ? file.preview.label : "Preview";
   els.previewTitle.textContent = `${file.name}`;
 
-  if (preview.status === "loading") {
-    els.previewBody.className = "preview-body is-loading";
-    els.previewBody.innerHTML = `
-      <div class="preview-loading">
-        <div class="preview-spinner"></div>
-        <p>Loading ${escapeHtml(previewLabel.toLowerCase())}...</p>
-      </div>
-    `;
-  } else if (preview.status === "error") {
+  if (preview.status === "error") {
     els.previewBody.className = "preview-body is-error";
     els.previewBody.innerHTML = `
       <div class="preview-error">
@@ -490,15 +493,32 @@ function renderPreview() {
         <p>${escapeHtml(preview.error || "The preview could not be loaded.")}</p>
       </div>
     `;
-  } else if (preview.status === "ready" && preview.objectUrl) {
-    if (file.preview.kind === "video") {
-      els.previewBody.className = "preview-body";
-      els.previewBody.innerHTML = `
-        <video class="preview-video" controls preload="metadata" poster="${escapeHtml(file.preview.posterUrl || "")}">
-          <source src="${escapeHtml(preview.objectUrl)}" type="video/mp4">
+  } else if (file.preview.kind === "video" && preview.streamUrl) {
+    els.previewBody.className = "preview-body";
+    els.previewBody.innerHTML = `
+      <div class="preview-video-shell">
+        <video id="preview-video" class="preview-video" controls preload="auto" playsinline poster="${escapeHtml(buildPreviewAssetUrl(file.preview.posterUrl))}">
+          <source src="${escapeHtml(preview.streamUrl)}" type="video/mp4">
         </video>
-      `;
-    } else {
+        ${preview.status === "loading" ? `
+          <div class="preview-video-overlay" data-preview-overlay>
+            <div class="preview-spinner"></div>
+            <p>Buffering preview video...</p>
+          </div>
+        ` : ""}
+      </div>
+    `;
+    wirePreviewVideoEvents(file);
+  } else if (preview.status === "loading") {
+    els.previewBody.className = "preview-body is-loading";
+    els.previewBody.innerHTML = `
+      <div class="preview-loading">
+        <div class="preview-spinner"></div>
+        <p>Loading ${escapeHtml(previewLabel.toLowerCase())}...</p>
+      </div>
+    `;
+  } else if (preview.status === "ready" && preview.objectUrl) {
+    if (file.preview.kind !== "video") {
       els.previewBody.className = "preview-body";
       els.previewBody.innerHTML = `
         <img class="preview-image" src="${escapeHtml(preview.objectUrl)}" alt="Preview of ${escapeHtml(file.name)}">
@@ -585,20 +605,123 @@ function syncPreviewSelection() {
 }
 
 function clearPreview() {
-  revokePreviewObjectUrl();
+  resetPreviewMediaState();
   state.preview = {
     file: null,
     status: "idle",
     objectUrl: null,
+    streamUrl: null,
     error: null
   };
   renderPreview();
+}
+
+function resetPreviewMediaState() {
+  revokePreviewObjectUrl();
 }
 
 function revokePreviewObjectUrl() {
   if (state.preview.objectUrl) {
     URL.revokeObjectURL(state.preview.objectUrl);
   }
+}
+
+function wirePreviewVideoEvents(file) {
+  const video = document.querySelector("#preview-video");
+  if (!video) {
+    return;
+  }
+
+  const expectedPath = file.path;
+
+  video.addEventListener("loadeddata", () => {
+    if (!isCurrentPreviewFile(expectedPath)) {
+      return;
+    }
+
+    removePreviewVideoOverlay();
+  });
+
+  video.addEventListener("canplay", () => {
+    if (!isCurrentPreviewFile(expectedPath)) {
+      return;
+    }
+
+    state.preview.status = "ready";
+    removePreviewVideoOverlay();
+  });
+
+  video.addEventListener("waiting", () => {
+    if (!isCurrentPreviewFile(expectedPath)) {
+      return;
+    }
+
+    showPreviewVideoOverlay("Buffering preview video...");
+  });
+
+  video.addEventListener("playing", () => {
+    if (!isCurrentPreviewFile(expectedPath)) {
+      return;
+    }
+
+    removePreviewVideoOverlay();
+  });
+
+  video.addEventListener("error", () => {
+    if (!isCurrentPreviewFile(expectedPath)) {
+      return;
+    }
+
+    state.preview.status = "error";
+    state.preview.error = "Unable to stream the preview video from the camera.";
+    renderPreview();
+  });
+}
+
+function removePreviewVideoOverlay() {
+  const overlay = els.previewBody.querySelector("[data-preview-overlay]");
+  if (overlay) {
+    overlay.remove();
+  }
+}
+
+function showPreviewVideoOverlay(message) {
+  let overlay = els.previewBody.querySelector("[data-preview-overlay]");
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.className = "preview-video-overlay";
+    overlay.dataset.previewOverlay = "true";
+    overlay.innerHTML = `
+      <div class="preview-spinner"></div>
+      <p></p>
+    `;
+    const shell = els.previewBody.querySelector(".preview-video-shell");
+    if (shell) {
+      shell.appendChild(overlay);
+    }
+  }
+
+  const text = overlay.querySelector("p");
+  if (text) {
+    text.textContent = message;
+  }
+}
+
+function isCurrentPreviewFile(expectedPath) {
+  return Boolean(state.preview.file && state.preview.file.path === expectedPath);
+}
+
+function buildPreviewStreamUrl(baseUrl) {
+  return buildPreviewAssetUrl(baseUrl);
+}
+
+function buildPreviewAssetUrl(baseUrl) {
+  if (!baseUrl) {
+    return "";
+  }
+
+  const separator = String(baseUrl).includes("?") ? "&" : "?";
+  return `${baseUrl}${separator}t=${Date.now()}`;
 }
 
 function appendLog(message) {
