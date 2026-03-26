@@ -15,7 +15,11 @@ It was designed around the official Open GoPro docs before any code was written:
 - Enables official wired USB control
 - Sends keep-alive requests every 3 seconds so the camera does not go to sleep
 - Reads the GoPro media list
+- Streams low-resolution previews before download:
+  - videos use the GoPro proxy `.LRV` file when available
+  - photos use the GoPro screennail / thumbnail endpoints
 - Downloads selected footage to your PC
+- Shows download progress for the whole queue and the current file
 
 ## Important GoPro notes
 

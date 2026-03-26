@@ -30,6 +30,12 @@ input {
   font: inherit;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  transform: none !important;
+}
+
 .page-shell {
   width: min(1200px, calc(100vw - 32px));
   margin: 0 auto;
@@ -181,6 +187,10 @@ input {
   align-items: center;
 }
 
+.toolbar {
+  margin-bottom: 14px;
+}
+
 .primary-button,
 .ghost-button,
 .candidate-chip,
@@ -290,9 +300,178 @@ tbody tr:hover {
   background: rgba(15, 76, 92, 0.04);
 }
 
+tbody tr.is-active-row {
+  background: rgba(244, 162, 97, 0.18);
+}
+
 .empty-state {
   padding: 28px 14px;
   text-align: center;
+}
+
+.download-status-card {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border-radius: 20px;
+  background: #fff;
+  border: 1px solid var(--border);
+}
+
+.download-status-card.is-running,
+.download-status-card.is-queued {
+  background: linear-gradient(180deg, rgba(239, 71, 111, 0.06) 0%, rgba(255, 255, 255, 0.95) 100%);
+}
+
+.download-status-card.is-completed {
+  background: linear-gradient(180deg, rgba(15, 76, 92, 0.1) 0%, rgba(255, 255, 255, 0.95) 100%);
+}
+
+.download-status-card.is-failed {
+  background: linear-gradient(180deg, rgba(214, 40, 57, 0.08) 0%, rgba(255, 255, 255, 0.95) 100%);
+}
+
+.download-headline {
+  font-family: "Rockwell", "Georgia", serif;
+  font-size: 1.2rem;
+}
+
+.progress-block {
+  display: grid;
+  gap: 9px;
+}
+
+.progress-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.progress-label-row span {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.progress-track {
+  position: relative;
+  height: 14px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(20, 33, 61, 0.08);
+}
+
+.progress-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #ef476f 0%, #f4a261 100%);
+  transition: width 180ms ease;
+}
+
+.download-summary {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.media-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.9fr);
+  gap: 18px;
+}
+
+.media-browser {
+  min-width: 0;
+}
+
+.preview-pane {
+  display: grid;
+  gap: 14px;
+  align-content: start;
+  padding: 18px;
+  border-radius: 22px;
+  background: linear-gradient(180deg, rgba(15, 76, 92, 0.08) 0%, rgba(255, 255, 255, 0.92) 100%);
+  border: 1px solid var(--border);
+}
+
+.preview-pane-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.preview-pane h3 {
+  margin: 4px 0 0;
+  font-family: "Rockwell", "Georgia", serif;
+  font-size: 1.3rem;
+}
+
+.preview-body {
+  display: grid;
+  place-items: center;
+  min-height: 280px;
+  overflow: hidden;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(20, 33, 61, 0.08);
+}
+
+.preview-body.is-empty,
+.preview-body.is-loading,
+.preview-body.is-error {
+  padding: 22px;
+  text-align: center;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.preview-video,
+.preview-image {
+  display: block;
+  width: 100%;
+  max-height: 430px;
+  background: #0a1220;
+  object-fit: contain;
+}
+
+.preview-meta {
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+}
+
+.preview-meta-line strong {
+  color: var(--ink);
+}
+
+.preview-note {
+  margin-top: 8px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(244, 162, 97, 0.18);
+  color: var(--ink);
+  line-height: 1.55;
+}
+
+.preview-loading,
+.preview-error {
+  display: grid;
+  gap: 10px;
+  justify-items: center;
+}
+
+.preview-spinner {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 4px solid rgba(20, 33, 61, 0.12);
+  border-top-color: var(--accent);
+  animation: spin 900ms linear infinite;
+}
+
+.preview-action {
+  padding-inline: 12px;
 }
 
 .activity-log {
@@ -311,6 +490,12 @@ tbody tr:hover {
   font-size: 0.92rem;
 }
 
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 @media (max-width: 900px) {
   .hero,
   .layout {
@@ -324,5 +509,15 @@ tbody tr:hover {
 
   .hero {
     padding: 22px;
+  }
+
+  .media-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .preview-pane-header,
+  .progress-label-row {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }

@@ -1,9 +1,10 @@
 const http = require("http");
+const { randomUUID } = require("crypto");
 const fs = require("fs");
 const fsp = require("fs/promises");
 const os = require("os");
 const path = require("path");
-const { Readable } = require("stream");
+const { Readable, Transform } = require("stream");
 const { pipeline } = require("stream/promises");
 
 const HOST = "127.0.0.1";
@@ -42,7 +43,8 @@ const DOC_SUMMARY = [
 ];
 
 const state = {
-  session: null
+  session: null,
+  downloadJobs: new Map()
 };
 
 function createServer() {
@@ -50,9 +52,17 @@ function createServer() {
     try {
       await routeRequest(req, res);
     } catch (error) {
-      sendJson(res, 500, {
-        error: error instanceof Error ? error.message : String(error)
-      });
+      console.error(
+        `[${new Date().toISOString()}] ${req.method || "GET"} ${req.url || "/"} failed:`,
+        error
+      );
+      if (res.headersSent) {
+        res.destroy();
+      } else {
+        sendJson(res, 500, {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
     }
   });
 }
@@ -79,9 +89,11 @@ async function routeRequest(req, res) {
   }
 
   if (pathname === "/api/status" && req.method === "GET") {
+    const activeJob = findActiveDownloadJob();
     return sendJson(res, 200, {
       session: presentSession(),
-      candidates: listCandidateUsbIps()
+      candidates: listCandidateUsbIps(),
+      activeDownloadJob: activeJob ? presentDownloadJob(activeJob) : null
     });
   }
 
@@ -106,11 +118,47 @@ async function routeRequest(req, res) {
     return sendJson(res, 200, payload);
   }
 
+  if (pathname === "/api/media/preview" && req.method === "GET") {
+    ensureConnected();
+    return proxyPreviewAsset(res, requestUrl.searchParams);
+  }
+
   if (pathname === "/api/download" && req.method === "POST") {
     ensureConnected();
     const body = await readJsonBody(req);
     const result = await downloadMedia(body || {});
     return sendJson(res, 200, result);
+  }
+
+  if (pathname === "/api/download-jobs" && req.method === "POST") {
+    ensureConnected();
+
+    const activeJob = findActiveDownloadJob();
+    if (activeJob) {
+      return sendJson(res, 409, {
+        error: `A download is already running for job ${activeJob.id}.`
+      });
+    }
+
+    const body = await readJsonBody(req);
+    const job = await createDownloadJob(body || {});
+    return sendJson(res, 202, {
+      job: presentDownloadJob(job)
+    });
+  }
+
+  const downloadJobMatch = pathname.match(/^\/api\/download-jobs\/([a-z0-9-]+)$/i);
+  if (downloadJobMatch && req.method === "GET") {
+    const job = state.downloadJobs.get(downloadJobMatch[1]);
+    if (!job) {
+      return sendJson(res, 404, {
+        error: "Download job not found."
+      });
+    }
+
+    return sendJson(res, 200, {
+      job: presentDownloadJob(job)
+    });
   }
 
   if (pathname === "/" && req.method === "GET") {
@@ -367,11 +415,14 @@ function flattenMediaList(mediaList) {
 
       const filename = fileEntry.n;
       const extension = path.extname(filename).slice(1).toLowerCase();
+      const previewDescriptor = buildPreviewDescriptor(directoryEntry.d, filename, fileEntry);
       files.push({
         directory: directoryEntry.d,
         name: filename,
         extension,
         type: describeFileType(extension),
+        preview: previewDescriptor,
+        lowResSizeBytes: Number(fileEntry.glrv || 0),
         sizeBytes: Number(fileEntry.s || 0),
         createdUnix: Number(fileEntry.cre || 0),
         modifiedUnix: Number(fileEntry.mod || 0),
@@ -385,10 +436,10 @@ function flattenMediaList(mediaList) {
 }
 
 function describeFileType(extension) {
-  if (["mp4", "mov"].includes(extension)) {
+  if (isVideoExtension(extension)) {
     return "Video";
   }
-  if (["jpg", "jpeg", "png", "gpr"].includes(extension)) {
+  if (isPhotoExtension(extension)) {
     return "Photo";
   }
   if (extension === "thm") {
@@ -400,7 +451,441 @@ function describeFileType(extension) {
   return "Other";
 }
 
+function isVideoExtension(extension) {
+  return ["mp4", "mov"].includes(String(extension || "").toLowerCase());
+}
+
+function isPhotoExtension(extension) {
+  return ["jpg", "jpeg", "png", "gpr"].includes(String(extension || "").toLowerCase());
+}
+
+function buildPreviewDescriptor(directory, filename, fileEntry) {
+  const extension = path.extname(filename).slice(1).toLowerCase();
+  const search = new URLSearchParams({
+    directory,
+    name: filename
+  });
+
+  if (isVideoExtension(extension)) {
+    return {
+      available: true,
+      kind: "video",
+      label: "Low-res proxy preview",
+      url: `/api/media/preview?assetType=video&${search.toString()}`,
+      posterUrl: `/api/media/preview?assetType=thumbnail&${search.toString()}`,
+      proxyCandidates: buildVideoPreviewCandidates(directory, filename),
+      lowResSizeBytes: Number(fileEntry.glrv || 0)
+    };
+  }
+
+  if (isPhotoExtension(extension)) {
+    return {
+      available: true,
+      kind: "image",
+      label: "Photo screennail preview",
+      url: `/api/media/preview?assetType=image&${search.toString()}`,
+      posterUrl: null,
+      proxyCandidates: []
+    };
+  }
+
+  return {
+    available: false,
+    kind: null,
+    label: "No preview",
+    url: null,
+    posterUrl: null,
+    proxyCandidates: []
+  };
+}
+
+function buildVideoPreviewCandidates(directory, filename) {
+  const parsed = path.parse(filename);
+  const baseName = parsed.name.toUpperCase();
+  const candidates = [];
+  const seen = new Set();
+
+  function addCandidate(candidateDirectory, candidateName) {
+    const key = `${candidateDirectory}/${candidateName}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      candidates.push({
+        directory: candidateDirectory,
+        name: candidateName
+      });
+    }
+  }
+
+  if (baseName.startsWith("GOPR") && baseName.length > 4) {
+    addCandidate(directory, `GLPR${baseName.slice(4)}.LRV`);
+  }
+
+  if (baseName.startsWith("G") && baseName.length > 2) {
+    addCandidate(directory, `GL${baseName.slice(2)}.LRV`);
+  }
+
+  addCandidate(directory, `${baseName}.LRV`);
+
+  return candidates;
+}
+
+function buildVideoThumbnailCandidates(directory, filename) {
+  return buildVideoSiblingCandidates(directory, filename, "THM");
+}
+
+function buildPhotoPreviewCandidates(directory, filename) {
+  const parsed = path.parse(filename);
+  const upperExtension = parsed.ext.replace(".", "").toUpperCase();
+  const candidates = [];
+  const seen = new Set();
+
+  function addCandidate(candidateDirectory, candidateName) {
+    const key = `${candidateDirectory}/${candidateName}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      candidates.push({
+        directory: candidateDirectory,
+        name: candidateName
+      });
+    }
+  }
+
+  addCandidate(directory, filename);
+
+  if (upperExtension === "GPR") {
+    addCandidate(directory, `${parsed.name}.JPG`);
+  }
+
+  return candidates;
+}
+
+function buildVideoSiblingCandidates(directory, filename, targetExtension) {
+  const parsed = path.parse(filename);
+  const baseName = parsed.name.toUpperCase();
+  const upperExtension = String(targetExtension || "").toUpperCase();
+  const candidates = [];
+  const seen = new Set();
+
+  function addCandidate(candidateDirectory, candidateName) {
+    const key = `${candidateDirectory}/${candidateName}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      candidates.push({
+        directory: candidateDirectory,
+        name: candidateName
+      });
+    }
+  }
+
+  if (baseName.startsWith("GOPR") && baseName.length > 4) {
+    addCandidate(directory, `GLPR${baseName.slice(4)}.${upperExtension}`);
+  }
+
+  if (baseName.startsWith("G") && baseName.length > 2) {
+    addCandidate(directory, `GL${baseName.slice(2)}.${upperExtension}`);
+  }
+
+  addCandidate(directory, `${baseName}.${upperExtension}`);
+
+  return candidates;
+}
+
+async function proxyPreviewAsset(res, searchParams) {
+  const assetType = String(searchParams.get("assetType") || "").trim().toLowerCase();
+  const directory = sanitizePathPart(searchParams.get("directory"), "100GOPRO");
+  const name = sanitizePathPart(searchParams.get("name"), "media.bin");
+
+  if (!assetType) {
+    throw new Error("Preview asset type is required.");
+  }
+
+  if (assetType === "video") {
+    const candidates = buildVideoPreviewCandidates(directory, name);
+    const previewResponse = await tryMediaFileCandidates(state.session.ip, candidates, {
+      timeoutMs: 0
+    });
+
+    if (previewResponse) {
+      return proxyBinaryResponse(res, previewResponse.response, {
+        contentType: "video/mp4",
+        filename: previewResponse.candidate.name
+      });
+    }
+
+    const sourceResponse = await goproGet(state.session.ip, buildMediaDownloadEndpoint(directory, name), {
+      timeoutMs: 0
+    });
+
+    return proxyBinaryResponse(res, sourceResponse, {
+      filename: name
+    });
+  }
+
+  if (assetType === "image") {
+    const photoPreview = await tryPhotoPreview(state.session.ip, directory, name);
+    if (!photoPreview) {
+      throw new Error(`No preview image was found for ${directory}/${name}.`);
+    }
+
+    return proxyBinaryResponse(res, photoPreview.response, {
+      contentType: "image/jpeg",
+      filename: `${path.parse(photoPreview.candidate.name).name}-preview.jpg`
+    });
+  }
+
+  if (assetType === "thumbnail") {
+    const previewResponse = await tryThumbnailPreview(state.session.ip, directory, name);
+    if (!previewResponse) {
+      throw new Error(`No thumbnail was found for ${directory}/${name}.`);
+    }
+
+    return proxyBinaryResponse(res, previewResponse.response, {
+      contentType: "image/jpeg",
+      filename: `${path.parse(previewResponse.candidate.name).name}-thumbnail.jpg`
+    });
+  }
+
+  throw new Error(`Unsupported preview asset type: ${assetType}`);
+}
+
+async function tryPhotoPreview(ip, directory, name) {
+  for (const candidate of buildPhotoPreviewCandidates(directory, name)) {
+    const screennailResponse = await tryPreviewEndpoint(ip, "/gopro/media/screennail", candidate);
+    if (screennailResponse) {
+      return screennailResponse;
+    }
+
+    const thumbnailResponse = await tryPreviewEndpoint(ip, "/gopro/media/thumbnail", candidate);
+    if (thumbnailResponse) {
+      return thumbnailResponse;
+    }
+  }
+
+  for (const candidate of buildPhotoPreviewCandidates(directory, name)) {
+    if (!isDirectPreviewableImage(candidate.name)) {
+      continue;
+    }
+
+    const response = await tryMediaFileCandidates(ip, [candidate], {
+      timeoutMs: 0
+    });
+    if (response) {
+      return response;
+    }
+  }
+
+  return null;
+}
+
+async function tryThumbnailPreview(ip, directory, name) {
+  const endpointThumbnail = await tryPreviewEndpoint(ip, "/gopro/media/thumbnail", {
+    directory,
+    name
+  });
+  if (endpointThumbnail) {
+    return endpointThumbnail;
+  }
+
+  const thmResponse = await tryMediaFileCandidates(ip, buildVideoThumbnailCandidates(directory, name), {
+    timeoutMs: 0
+  });
+  if (thmResponse) {
+    return thmResponse;
+  }
+
+  if (isPhotoExtension(path.extname(name).slice(1))) {
+    return tryPhotoPreview(ip, directory, name);
+  }
+
+  return null;
+}
+
+async function tryPreviewEndpoint(ip, endpoint, candidate) {
+  try {
+    const response = await goproGet(ip, endpoint, {
+      query: {
+        path: `${candidate.directory}/${candidate.name}`
+      },
+      timeoutMs: 10000
+    });
+
+    return {
+      candidate,
+      response
+    };
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+async function tryMediaFileCandidates(ip, candidates, options = {}) {
+  for (const candidate of candidates) {
+    try {
+      const response = await goproGet(ip, buildMediaDownloadEndpoint(candidate.directory, candidate.name), options);
+      return {
+        candidate,
+        response
+      };
+    } catch (error) {
+      if (isMissingFileError(error)) {
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  return null;
+}
+
+async function proxyBinaryResponse(res, response, options = {}) {
+  if (!response.body) {
+    throw new Error("The GoPro did not provide preview data.");
+  }
+
+  const headers = {
+    "Content-Type": options.contentType || response.headers.get("content-type") || "application/octet-stream",
+    "Cache-Control": "no-store"
+  };
+
+  const contentLength = response.headers.get("content-length");
+  if (contentLength) {
+    headers["Content-Length"] = contentLength;
+  }
+
+  if (options.filename) {
+    headers["Content-Disposition"] = `inline; filename="${sanitizePathPart(options.filename, "preview.bin")}"`;
+  }
+
+  res.writeHead(200, headers);
+  await pipeline(Readable.fromWeb(response.body), res);
+}
+
+function isMissingFileError(error) {
+  return Boolean(error && (error.status === 404 || /HTTP 404/i.test(String(error.message || ""))));
+}
+
+function isDirectPreviewableImage(filename) {
+  const extension = path.extname(filename).slice(1).toLowerCase();
+  return ["jpg", "jpeg", "png"].includes(extension);
+}
+
+function buildMediaDownloadEndpoint(directory, filename) {
+  return `/videos/DCIM/${encodeURIComponent(directory)}/${encodeURIComponent(filename)}`;
+}
+
 async function downloadMedia(options) {
+  const plan = await prepareDownloadPlan(options);
+  await fsp.mkdir(plan.downloadRoot, { recursive: true });
+
+  const downloaded = [];
+  for (const item of plan.items) {
+    await fsp.mkdir(path.dirname(item.outputPath), { recursive: true });
+    const result = await downloadRemoteFile(state.session.ip, item, item.outputPath);
+
+    downloaded.push({
+      directory: item.directory,
+      name: item.name,
+      savedTo: item.outputPath,
+      sizeBytes: result.downloadedBytes
+    });
+  }
+
+  return {
+    ok: true,
+    root: plan.downloadRoot,
+    count: downloaded.length,
+    files: downloaded
+  };
+}
+
+async function createDownloadJob(options) {
+  const plan = await prepareDownloadPlan(options);
+
+  const job = {
+    id: randomUUID(),
+    targetIp: state.session.ip,
+    createdAt: new Date().toISOString(),
+    startedAt: null,
+    finishedAt: null,
+    status: "queued",
+    error: null,
+    downloadRoot: plan.downloadRoot,
+    items: plan.items.map((item, index) => ({
+      id: `${index + 1}`,
+      directory: item.directory,
+      name: item.name,
+      outputPath: item.outputPath,
+      sizeBytes: Number(item.sizeBytes || 0),
+      downloadedBytes: 0,
+      status: "queued",
+      error: null
+    })),
+    completedFiles: 0,
+    completedBytes: 0
+  };
+
+  state.downloadJobs.set(job.id, job);
+
+  setImmediate(() => {
+    void runDownloadJob(job);
+  });
+
+  return job;
+}
+
+async function runDownloadJob(job) {
+  job.status = "running";
+  job.startedAt = new Date().toISOString();
+  job.error = null;
+
+  try {
+    await fsp.mkdir(job.downloadRoot, { recursive: true });
+
+    for (const item of job.items) {
+      item.status = "running";
+      item.error = null;
+      item.downloadedBytes = 0;
+
+      await fsp.mkdir(path.dirname(item.outputPath), { recursive: true });
+
+      try {
+        const result = await downloadRemoteFile(job.targetIp, item, item.outputPath, ({ downloadedBytes, totalBytes }) => {
+          if (totalBytes && item.sizeBytes !== totalBytes) {
+            item.sizeBytes = totalBytes;
+          }
+          item.downloadedBytes = downloadedBytes;
+        });
+
+        item.downloadedBytes = result.downloadedBytes;
+        item.status = "completed";
+        job.completedFiles += 1;
+        job.completedBytes += result.downloadedBytes;
+      } catch (error) {
+        item.status = "failed";
+        item.error = error instanceof Error ? error.message : String(error);
+        job.status = "failed";
+        job.error = item.error;
+        throw error;
+      }
+    }
+
+    job.status = "completed";
+  } catch (error) {
+    if (job.status !== "failed") {
+      job.status = "failed";
+      job.error = error instanceof Error ? error.message : String(error);
+    }
+  } finally {
+    job.finishedAt = new Date().toISOString();
+  }
+}
+
+async function prepareDownloadPlan(options) {
   const requestedFiles = Array.isArray(options.files) ? options.files : [];
   const payload = requestedFiles.length ? requestedFiles : (await fetchMediaList()).files;
 
@@ -413,40 +898,123 @@ async function downloadMedia(options) {
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const downloadRoot = path.join(baseRoot, `${timestamp}-${sessionLabel}`);
 
-  await fsp.mkdir(downloadRoot, { recursive: true });
+  return {
+    downloadRoot,
+    items: payload.map((item) => createDownloadItem(item, downloadRoot))
+  };
+}
 
-  const downloaded = [];
-  for (const item of payload) {
-    const directory = sanitizePathPart(item.directory, "100GOPRO");
-    const filename = sanitizePathPart(item.name, "media.bin");
-    const outputPath = path.join(downloadRoot, directory, filename);
-    const endpoint = `/videos/DCIM/${encodeURIComponent(directory)}/${encodeURIComponent(filename)}`;
+function createDownloadItem(item, downloadRoot) {
+  const directory = sanitizePathPart(item.directory, "100GOPRO");
+  const name = sanitizePathPart(item.name, "media.bin");
 
-    await fsp.mkdir(path.dirname(outputPath), { recursive: true });
+  return {
+    directory,
+    name,
+    sizeBytes: Number(item.sizeBytes || 0),
+    outputPath: path.join(downloadRoot, directory, name)
+  };
+}
 
-    const response = await goproGet(state.session.ip, endpoint, {
-      timeoutMs: 0
-    });
+async function downloadRemoteFile(ip, item, outputPath, onProgress) {
+  const response = await goproGet(ip, buildMediaDownloadEndpoint(item.directory, item.name), {
+    timeoutMs: 0
+  });
 
-    if (!response.body) {
-      throw new Error(`GoPro did not return file content for ${directory}/${filename}.`);
+  if (!response.body) {
+    throw new Error(`GoPro did not return file content for ${item.directory}/${item.name}.`);
+  }
+
+  const headerSize = Number(response.headers.get("content-length") || 0);
+  const totalBytes = headerSize || Number(item.sizeBytes || 0);
+  let downloadedBytes = 0;
+
+  const progressStream = new Transform({
+    transform(chunk, encoding, callback) {
+      downloadedBytes += chunk.length;
+      if (typeof onProgress === "function") {
+        onProgress({
+          downloadedBytes,
+          totalBytes
+        });
+      }
+      callback(null, chunk);
     }
+  });
 
-    await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(outputPath));
-
-    downloaded.push({
-      directory,
-      name: filename,
-      savedTo: outputPath
-    });
+  try {
+    await pipeline(Readable.fromWeb(response.body), progressStream, fs.createWriteStream(outputPath));
+  } catch (error) {
+    await fsp.rm(outputPath, { force: true }).catch(() => {});
+    throw error;
   }
 
   return {
-    ok: true,
-    root: downloadRoot,
-    count: downloaded.length,
-    files: downloaded
+    downloadedBytes,
+    totalBytes
   };
+}
+
+function findActiveDownloadJob() {
+  for (const job of state.downloadJobs.values()) {
+    if (job.status === "queued" || job.status === "running") {
+      return job;
+    }
+  }
+
+  return null;
+}
+
+function presentDownloadJob(job) {
+  const runningItem = job.items.find((item) => item.status === "running") || null;
+  const totalFiles = job.items.length;
+  const totalBytes = job.items.reduce((sum, item) => sum + Number(item.sizeBytes || 0), 0);
+  const transferredBytes = job.completedBytes + Number(runningItem ? runningItem.downloadedBytes : 0);
+  const currentItem = runningItem
+    ? {
+        directory: runningItem.directory,
+        name: runningItem.name,
+        downloadedBytes: runningItem.downloadedBytes,
+        sizeBytes: Number(runningItem.sizeBytes || 0),
+        percent: calculatePercent(runningItem.downloadedBytes, runningItem.sizeBytes)
+      }
+    : null;
+
+  return {
+    id: job.id,
+    targetIp: job.targetIp,
+    status: job.status,
+    createdAt: job.createdAt,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+    error: job.error,
+    downloadRoot: job.downloadRoot,
+    totalFiles,
+    completedFiles: job.completedFiles,
+    totalBytes,
+    transferredBytes,
+    overallPercent: calculatePercent(transferredBytes, totalBytes),
+    currentItem,
+    files: job.items.map((item) => ({
+      directory: item.directory,
+      name: item.name,
+      sizeBytes: item.sizeBytes,
+      downloadedBytes: item.downloadedBytes,
+      status: item.status,
+      error: item.error
+    }))
+  };
+}
+
+function calculatePercent(value, total) {
+  const numerator = Number(value || 0);
+  const denominator = Number(total || 0);
+
+  if (!denominator) {
+    return null;
+  }
+
+  return Math.max(0, Math.min(100, Number(((numerator / denominator) * 100).toFixed(1))));
 }
 
 function resolveDownloadRoot(downloadRoot) {
@@ -529,7 +1097,9 @@ async function goproGet(ip, pathname, options = {}) {
     });
 
     if (!response.ok) {
-      throw new Error(`GoPro responded with HTTP ${response.status} for ${pathname}.`);
+      const error = new Error(`GoPro responded with HTTP ${response.status} for ${pathname}.`);
+      error.status = response.status;
+      throw error;
     }
 
     return response;
@@ -612,6 +1182,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  buildVideoPreviewCandidates,
   createServer,
   computeUsbIpFromSerialSuffix,
   flattenMediaList,

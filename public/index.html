@@ -83,37 +83,86 @@
 
         <section class="panel">
           <div class="panel-header">
+            <h2>Download progress</h2>
+          </div>
+          <div id="download-status-card" class="download-status-card is-idle">
+            <div class="download-headline" id="download-headline">No active download.</div>
+            <div class="progress-block">
+              <div class="progress-label-row">
+                <span>Overall</span>
+                <strong id="overall-progress-text">0 B of 0 B</strong>
+              </div>
+              <div class="progress-track">
+                <div id="overall-progress-fill" class="progress-fill"></div>
+              </div>
+            </div>
+            <div class="progress-block">
+              <div class="progress-label-row">
+                <span>Current file</span>
+                <strong id="current-progress-text">Waiting for a download to start</strong>
+              </div>
+              <div class="progress-track">
+                <div id="current-progress-fill" class="progress-fill"></div>
+              </div>
+            </div>
+            <div id="download-summary" class="download-summary">
+              Preview a file first if you want to check the low-res version before offloading it.
+            </div>
+          </div>
+        </section>
+
+        <section class="panel panel-wide">
+          <div class="panel-header">
             <h2>Footage</h2>
             <button id="refresh-media-btn" class="ghost-button" type="button">Refresh list</button>
           </div>
 
-          <div class="toolbar">
-            <label class="checkbox-line">
-              <input id="select-all" type="checkbox">
-              <span>Select all</span>
-            </label>
-            <button id="download-selected-btn" class="primary-button" type="button">Download selected</button>
-            <button id="download-all-btn" class="ghost-button" type="button">Download all</button>
-          </div>
+          <div class="media-workspace">
+            <div class="media-browser">
+              <div class="toolbar">
+                <label class="checkbox-line">
+                  <input id="select-all" type="checkbox">
+                  <span>Select all</span>
+                </label>
+                <button id="download-selected-btn" class="primary-button" type="button">Download selected</button>
+                <button id="download-all-btn" class="ghost-button" type="button">Download all</button>
+              </div>
 
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th></th>
-                  <th>Name</th>
-                  <th>Type</th>
-                  <th>Folder</th>
-                  <th>Size</th>
-                  <th>Created</th>
-                </tr>
-              </thead>
-              <tbody id="media-body">
-                <tr>
-                  <td colspan="6" class="empty-state">Connect to a camera to load media.</td>
-                </tr>
-              </tbody>
-            </table>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th></th>
+                      <th>Name</th>
+                      <th>Type</th>
+                      <th>Folder</th>
+                      <th>Size</th>
+                      <th>Created</th>
+                      <th>Preview</th>
+                    </tr>
+                  </thead>
+                  <tbody id="media-body">
+                    <tr>
+                      <td colspan="7" class="empty-state">Connect to a camera to load media.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <aside class="preview-pane">
+              <div class="preview-pane-header">
+                <div>
+                  <div class="subheading">Preview</div>
+                  <h3 id="preview-title">Select a file</h3>
+                </div>
+                <button id="preview-download-btn" class="primary-button" type="button">Download this item</button>
+              </div>
+              <div id="preview-body" class="preview-body is-empty">
+                Choose a photo or video and click <strong>Preview</strong> to inspect a lightweight version before downloading.
+              </div>
+              <div id="preview-meta" class="preview-meta"></div>
+            </aside>
           </div>
         </section>
 
