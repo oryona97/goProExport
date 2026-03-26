@@ -14,6 +14,8 @@ const state = {
   downloadPollTimer: null
 };
 
+const ASSET_VERSION = Date.now();
+
 const els = {
   docsGrid: document.querySelector("#docs-grid"),
   candidateList: document.querySelector("#candidate-list"),
@@ -435,17 +437,21 @@ function renderMedia() {
   els.heroMediaCount.textContent = `${state.media.length} file${state.media.length === 1 ? "" : "s"}`;
 
   if (!state.media.length) {
-    els.mediaBody.innerHTML = `<tr><td colspan="7" class="empty-state">${state.session ? "No media returned by the camera yet." : "Connect to a camera to load media."}</td></tr>`;
+    els.mediaBody.innerHTML = `<tr><td colspan="8" class="empty-state">${state.session ? "No media returned by the camera yet." : "Connect to a camera to load media."}</td></tr>`;
     return;
   }
 
   els.mediaBody.innerHTML = state.media
     .map((file) => {
       const isActivePreview = Boolean(state.preview.file && state.preview.file.path === file.path);
+      const thumbnailUrl = buildMediaThumbnailUrl(file);
 
       return `
         <tr class="${isActivePreview ? "is-active-row" : ""}">
           <td><input class="row-selector" type="checkbox" data-path="${escapeHtml(file.path)}"></td>
+          <td>
+            ${thumbnailUrl ? `<img class="media-thumb" src="${escapeHtml(thumbnailUrl)}" alt="Thumbnail for ${escapeHtml(file.name)}" loading="lazy" data-fallback-label="${escapeHtml(file.type.slice(0, 1) || "?")}">` : `<div class="media-thumb media-thumb-empty">${escapeHtml(file.type.slice(0, 1) || "?")}</div>`}
+          </td>
           <td>${escapeHtml(file.name)}</td>
           <td>${escapeHtml(file.type)}</td>
           <td>${escapeHtml(file.directory)}</td>
@@ -466,6 +472,8 @@ function renderMedia() {
       void runUiTask(() => previewFile(button.dataset.path));
     });
   });
+
+  wireThumbnailFallbacks();
 }
 
 function renderPreview() {
@@ -494,7 +502,7 @@ function renderPreview() {
       </div>
     `;
   } else if (file.preview.kind === "video" && preview.streamUrl) {
-    els.previewBody.className = "preview-body";
+    els.previewBody.className = "preview-body is-video";
     els.previewBody.innerHTML = `
       <div class="preview-video-shell">
         <video id="preview-video" class="preview-video" controls preload="auto" playsinline poster="${escapeHtml(buildPreviewAssetUrl(file.preview.posterUrl))}">
@@ -534,6 +542,7 @@ function renderPreview() {
     <div class="preview-meta-line"><strong>Captured:</strong> ${formatUnix(file.createdUnix)}</div>
     <div class="preview-meta-line"><strong>Full file size:</strong> ${formatBytes(file.sizeBytes)}</div>
     <div class="preview-meta-line"><strong>Folder:</strong> ${escapeHtml(file.directory)}</div>
+    ${file.preview.thumbnailUrl ? `<div class="preview-meta-line"><strong>Thumbnail:</strong> GoPro THM-backed preview available</div>` : ""}
     <div class="preview-note">
       ${escapeHtml(file.preview.kind === "video" ? "This preview uses the GoPro low-resolution proxy file when available." : "This preview uses the GoPro screennail or thumbnail endpoint, not the full-resolution image.")}
     </div>
@@ -721,7 +730,36 @@ function buildPreviewAssetUrl(baseUrl) {
   }
 
   const separator = String(baseUrl).includes("?") ? "&" : "?";
-  return `${baseUrl}${separator}t=${Date.now()}`;
+  return `${baseUrl}${separator}v=${ASSET_VERSION}`;
+}
+
+function buildMediaThumbnailUrl(file) {
+  if (!file.preview) {
+    return "";
+  }
+
+  const baseUrl = file.preview.thumbnailUrl || file.preview.posterUrl || file.preview.url;
+  if (!baseUrl) {
+    return "";
+  }
+
+  return buildPreviewAssetUrl(baseUrl);
+}
+
+function wireThumbnailFallbacks() {
+  document.querySelectorAll(".media-thumb").forEach((image) => {
+    image.addEventListener("error", () => {
+      const fallback = createMediaThumbFallback(image.dataset.fallbackLabel || "?");
+      image.replaceWith(fallback);
+    }, { once: true });
+  });
+}
+
+function createMediaThumbFallback(label) {
+  const fallback = document.createElement("div");
+  fallback.className = "media-thumb media-thumb-empty";
+  fallback.textContent = label;
+  return fallback;
 }
 
 function appendLog(message) {

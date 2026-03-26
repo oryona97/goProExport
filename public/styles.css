@@ -290,6 +290,7 @@ td {
   padding: 12px 14px;
   border-bottom: 1px solid rgba(20, 33, 61, 0.08);
   text-align: left;
+  vertical-align: middle;
 }
 
 thead {
@@ -417,6 +418,13 @@ tbody tr.is-active-row {
   border: 1px solid rgba(20, 33, 61, 0.08);
 }
 
+.preview-body.is-video {
+  display: block;
+  min-height: 0;
+  padding: 0;
+  background: #0a1220;
+}
+
 .preview-body.is-empty,
 .preview-body.is-loading,
 .preview-body.is-error {
@@ -435,10 +443,16 @@ tbody tr.is-active-row {
   object-fit: contain;
 }
 
+.preview-video {
+  height: 100%;
+  max-height: none;
+}
+
 .preview-video-shell {
   position: relative;
   width: 100%;
-  height: 100%;
+  aspect-ratio: 16 / 9;
+  background: #0a1220;
 }
 
 .preview-video-overlay {
@@ -490,6 +504,24 @@ tbody tr.is-active-row {
 
 .preview-action {
   padding-inline: 12px;
+}
+
+.media-thumb {
+  display: block;
+  width: 72px;
+  height: 44px;
+  border-radius: 10px;
+  object-fit: cover;
+  background: #0a1220;
+  border: 1px solid rgba(20, 33, 61, 0.08);
+}
+
+.media-thumb-empty {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  background: rgba(20, 33, 61, 0.04);
+  font-weight: 700;
 }
 
 .activity-log {

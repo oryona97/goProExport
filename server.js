@@ -44,8 +44,13 @@ const DOC_SUMMARY = [
 
 const state = {
   session: null,
-  downloadJobs: new Map()
+  downloadJobs: new Map(),
+  thumbnailCache: new Map(),
+  thumbnailPending: new Map(),
+  thumbnailQueue: Promise.resolve()
 };
+
+const THUMBNAIL_CACHE_TTL_MS = 5 * 60 * 1000;
 
 function createServer() {
   return http.createServer(async (req, res) => {
@@ -472,6 +477,7 @@ function buildPreviewDescriptor(directory, filename, fileEntry) {
       kind: "video",
       label: "Low-res proxy preview",
       url: `/api/media/preview?assetType=video&${search.toString()}`,
+      thumbnailUrl: `/api/media/preview?assetType=thumbnail&${search.toString()}`,
       posterUrl: `/api/media/preview?assetType=thumbnail&${search.toString()}`,
       proxyCandidates: buildVideoPreviewCandidates(directory, filename),
       lowResSizeBytes: Number(fileEntry.glrv || 0)
@@ -484,6 +490,7 @@ function buildPreviewDescriptor(directory, filename, fileEntry) {
       kind: "image",
       label: "Photo screennail preview",
       url: `/api/media/preview?assetType=image&${search.toString()}`,
+      thumbnailUrl: `/api/media/preview?assetType=thumbnail&${search.toString()}`,
       posterUrl: null,
       proxyCandidates: []
     };
@@ -494,6 +501,7 @@ function buildPreviewDescriptor(directory, filename, fileEntry) {
     kind: null,
     label: "No preview",
     url: null,
+    thumbnailUrl: null,
     posterUrl: null,
     proxyCandidates: []
   };
@@ -637,14 +645,12 @@ async function proxyPreviewAsset(req, res, searchParams) {
   }
 
   if (assetType === "thumbnail") {
-    const previewResponse = await tryThumbnailPreview(state.session.ip, directory, name);
-    if (!previewResponse) {
-      throw new Error(`No thumbnail was found for ${directory}/${name}.`);
-    }
-
-    return proxyBinaryResponse(res, previewResponse.response, {
-      contentType: "image/jpeg",
-      filename: `${path.parse(previewResponse.candidate.name).name}-thumbnail.jpg`
+    const thumbnail = await getCachedThumbnail(state.session.ip, directory, name);
+    return sendBinary(res, 200, thumbnail.buffer, {
+      "Content-Type": thumbnail.contentType,
+      "Content-Length": thumbnail.buffer.length,
+      "Cache-Control": "private, max-age=300",
+      "Content-Disposition": `inline; filename="${sanitizePathPart(thumbnail.filename, "thumbnail.jpg")}"`
     });
   }
 
@@ -717,12 +723,55 @@ async function tryPreviewEndpoint(ip, endpoint, candidate) {
       response
     };
   } catch (error) {
-    if (isMissingFileError(error)) {
+    if (isPreviewUnavailableError(error)) {
       return null;
     }
 
     throw error;
   }
+}
+
+async function getCachedThumbnail(ip, directory, name) {
+  const cacheKey = `${ip}|${directory}|${name}`;
+  const now = Date.now();
+  const cached = state.thumbnailCache.get(cacheKey);
+
+  if (cached && now - cached.createdAt < THUMBNAIL_CACHE_TTL_MS) {
+    return cached;
+  }
+
+  if (state.thumbnailPending.has(cacheKey)) {
+    return state.thumbnailPending.get(cacheKey);
+  }
+
+  const pending = enqueueThumbnailWork(async () => {
+    const previewResponse = await tryThumbnailPreview(ip, directory, name);
+    if (!previewResponse) {
+      throw new Error(`No thumbnail was found for ${directory}/${name}.`);
+    }
+
+    const buffer = Buffer.from(await previewResponse.response.arrayBuffer());
+    const entry = {
+      createdAt: Date.now(),
+      filename: `${path.parse(previewResponse.candidate.name).name}-thumbnail.jpg`,
+      contentType: "image/jpeg",
+      buffer
+    };
+
+    state.thumbnailCache.set(cacheKey, entry);
+    return entry;
+  }).finally(() => {
+    state.thumbnailPending.delete(cacheKey);
+  });
+
+  state.thumbnailPending.set(cacheKey, pending);
+  return pending;
+}
+
+function enqueueThumbnailWork(task) {
+  const work = state.thumbnailQueue.then(task, task);
+  state.thumbnailQueue = work.catch(() => {});
+  return work;
 }
 
 async function tryMediaFileCandidates(ip, candidates, options = {}) {
@@ -770,8 +819,23 @@ async function proxyBinaryResponse(res, response, options = {}) {
   await pipeline(Readable.fromWeb(response.body), res);
 }
 
+function sendBinary(res, statusCode, buffer, headers = {}) {
+  res.writeHead(statusCode, headers);
+  res.end(buffer);
+}
+
 function isMissingFileError(error) {
   return Boolean(error && (error.status === 404 || /HTTP 404/i.test(String(error.message || ""))));
+}
+
+function isPreviewUnavailableError(error) {
+  return Boolean(
+    error &&
+      (error.status === 400 ||
+        error.status === 404 ||
+        /HTTP 400/i.test(String(error.message || "")) ||
+        /HTTP 404/i.test(String(error.message || "")))
+  );
 }
 
 function isDirectPreviewableImage(filename) {
