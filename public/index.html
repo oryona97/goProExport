@@ -3,179 +3,120 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>GoPro USB Footage App</title>
+    <title>GoPro USB Connection Home</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
-    <div class="page-shell">
+    <div class="page-shell home-shell">
       <header class="hero">
         <div class="hero-copy">
-          <p class="eyebrow">Open GoPro USB Offload</p>
-          <h1>Browse and download GoPro footage over USB-C from your PC.</h1>
+          <p class="eyebrow">GoPro USB Connection Home</p>
+          <h1>Connect the camera here, then jump straight into the main footage workspace.</h1>
           <p class="hero-text">
-            This app follows the official Open GoPro USB flow: connect over the GoPro USB network link,
-            enable wired control, keep the camera awake, then list and offload media from the SD card.
+            Power on the GoPro, connect it over USB-C, then use the Open GoPro wired flow below.
+            As soon as the camera session is active, the app redirects you to the main page automatically.
           </p>
+          <div class="hero-actions">
+            <a class="link-pill" href="/main">Open main page</a>
+            <span class="hero-note">Already connected? This page will send you there automatically.</span>
+          </div>
         </div>
         <div class="hero-card">
           <div class="hero-stat">
-            <span class="hero-label">Connection</span>
-            <strong id="hero-connection">Not connected</strong>
+            <span class="hero-label">Session</span>
+            <strong id="hero-connection">Ready to connect</strong>
           </div>
           <div class="hero-stat">
             <span class="hero-label">Download folder</span>
             <strong id="hero-download-root">./downloads</strong>
           </div>
           <div class="hero-stat">
-            <span class="hero-label">Media loaded</span>
-            <strong id="hero-media-count">0 files</strong>
+            <span class="hero-label">USB candidates</span>
+            <strong id="hero-candidate-count">0 detected</strong>
           </div>
         </div>
       </header>
 
-      <main class="layout">
-        <section class="panel panel-wide">
-          <div class="panel-header">
-            <h2>Official doc checkpoints</h2>
-            <a class="link-pill" href="https://gopro.github.io/OpenGoPro/http" target="_blank" rel="noreferrer">Open GoPro HTTP spec</a>
-          </div>
-          <div id="docs-grid" class="docs-grid"></div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-header">
-            <h2>Connect over USB-C</h2>
-            <button id="discover-btn" class="ghost-button" type="button">Scan USB candidates</button>
+      <main class="layout home-layout">
+        <section class="panel panel-wide home-tabs-panel">
+          <div class="tab-row" role="tablist" aria-label="Home tabs">
+            <button id="home-tab-connect" class="tab-button is-active" type="button" role="tab" aria-selected="true" aria-controls="home-panel-connect">Connect</button>
+            <button id="home-tab-about" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="home-panel-about">About</button>
           </div>
 
-          <form id="connect-form" class="stack">
-            <label class="field">
-              <span>Camera IP</span>
-              <input id="camera-ip" type="text" placeholder="172.27.189.51">
-            </label>
-
-            <label class="field">
-              <span>Or last 3 serial digits</span>
-              <input id="serial-suffix" type="text" maxlength="3" placeholder="789">
-            </label>
-
-            <label class="field">
-              <span>Download root</span>
-              <input id="download-root" type="text" value="./downloads">
-            </label>
-
-            <div class="button-row">
-              <button id="connect-btn" class="primary-button" type="submit">Connect to GoPro</button>
-              <button id="disconnect-btn" class="ghost-button" type="button">Disconnect</button>
+          <div id="home-panel-connect" class="tab-panel" role="tabpanel" aria-labelledby="home-tab-connect">
+            <div class="panel-header">
+              <h2>Connect over USB-C</h2>
+              <button id="discover-btn" class="ghost-button" type="button">Scan USB candidates</button>
             </div>
-          </form>
 
-          <div>
-            <div class="subheading">Detected USB candidates</div>
-            <div id="candidate-list" class="candidate-list"></div>
+            <form id="connect-form" class="stack">
+              <label class="field">
+                <span>Camera IP</span>
+                <input id="camera-ip" type="text" placeholder="172.27.189.51">
+              </label>
+
+              <label class="field">
+                <span>Or last 3 serial digits</span>
+                <input id="serial-suffix" type="text" maxlength="3" placeholder="789">
+              </label>
+
+              <label class="field">
+                <span>Download root</span>
+                <input id="download-root" type="text" value="./downloads">
+              </label>
+
+              <div class="button-row">
+                <button id="connect-btn" class="primary-button" type="submit">Connect to GoPro</button>
+                <button id="disconnect-btn" class="ghost-button" type="button">Disconnect</button>
+              </div>
+            </form>
+
+            <div>
+              <div class="subheading">Detected USB candidates</div>
+              <div id="candidate-list" class="candidate-list"></div>
+            </div>
+
+            <div class="status-box">
+              <div class="subheading">Connection status</div>
+              <div id="session-summary" class="status-content">No active session.</div>
+            </div>
           </div>
 
-          <div class="status-box">
-            <div class="subheading">Connection status</div>
-            <div id="session-summary" class="status-content">No active session.</div>
-          </div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-header">
-            <h2>Download progress</h2>
-          </div>
-          <div id="download-status-card" class="download-status-card is-idle">
-            <div class="download-headline" id="download-headline">No active download.</div>
-            <div class="progress-block">
-              <div class="progress-label-row">
-                <span>Overall</span>
-                <strong id="overall-progress-text">0 B of 0 B</strong>
-              </div>
-              <div class="progress-track">
-                <div id="overall-progress-fill" class="progress-fill"></div>
-              </div>
+          <div id="home-panel-about" class="tab-panel" role="tabpanel" aria-labelledby="home-tab-about" hidden>
+            <div class="panel-header">
+              <h2>Official doc checkpoints</h2>
+              <a class="link-pill" href="https://gopro.github.io/OpenGoPro/http" target="_blank" rel="noreferrer">Open GoPro HTTP spec</a>
             </div>
-            <div class="progress-block">
-              <div class="progress-label-row">
-                <span>Current file</span>
-                <strong id="current-progress-text">Waiting for a download to start</strong>
-              </div>
-              <div class="progress-track">
-                <div id="current-progress-fill" class="progress-fill"></div>
-              </div>
-            </div>
-            <div id="download-summary" class="download-summary">
-              Preview a file first if you want to check the low-res version before offloading it.
-            </div>
+            <div id="docs-grid" class="docs-grid"></div>
           </div>
         </section>
 
         <section class="panel panel-wide">
           <div class="panel-header">
-            <h2>Footage</h2>
-            <button id="refresh-media-btn" class="ghost-button" type="button">Refresh list</button>
+            <h2>Before you connect</h2>
           </div>
 
-          <div class="media-workspace">
-            <div class="media-browser">
-              <div class="toolbar">
-                <label class="checkbox-line">
-                  <input id="select-all" type="checkbox">
-                  <span>Select all</span>
-                </label>
-                <button id="download-selected-btn" class="primary-button" type="button">Download selected</button>
-                <button id="download-all-btn" class="ghost-button" type="button">Download all</button>
-              </div>
+          <div class="home-checklist">
+            <article class="home-note-card">
+              <div class="subheading">Quick runbook</div>
+              <ul class="checklist">
+                <li>Connect the camera over USB-C and wait for the network interface to appear.</li>
+                <li>Use a detected candidate IP if the app finds one for you.</li>
+                <li>Set the download root once and the app keeps it for the main page.</li>
+                <li>When the session turns healthy, the app opens the main workspace automatically.</li>
+              </ul>
+            </article>
 
-              <div class="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th></th>
-                      <th>Thumb</th>
-                      <th>Name</th>
-                      <th>Type</th>
-                      <th>Folder</th>
-                      <th>Size</th>
-                      <th>Created</th>
-                      <th>Preview</th>
-                    </tr>
-                  </thead>
-                  <tbody id="media-body">
-                    <tr>
-                      <td colspan="8" class="empty-state">Connect to a camera to load media.</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
+            <div>
+              <div class="subheading">Connection activity</div>
+              <div id="activity-log" class="activity-log activity-log-tall"></div>
             </div>
-
-            <aside class="preview-pane">
-              <div class="preview-pane-header">
-                <div>
-                  <div class="subheading">Preview</div>
-                  <h3 id="preview-title">Select a file</h3>
-                </div>
-                <button id="preview-download-btn" class="primary-button" type="button">Download this item</button>
-              </div>
-              <div id="preview-body" class="preview-body is-empty">
-                Choose a photo or video and click <strong>Preview</strong> to inspect a lightweight version before downloading.
-              </div>
-              <div id="preview-meta" class="preview-meta"></div>
-            </aside>
           </div>
-        </section>
-
-        <section class="panel panel-wide">
-          <div class="panel-header">
-            <h2>Activity</h2>
-          </div>
-          <div id="activity-log" class="activity-log"></div>
         </section>
       </main>
     </div>
 
-    <script src="/app.js" defer></script>
+    <script src="/home.js" defer></script>
   </body>
 </html>

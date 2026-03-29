@@ -14,8 +14,7 @@ const state = {
   queueSequence: 0,
   downloadJob: null,
   downloadPollTimer: null,
-  downloadCenterCollapsed: false,
-  downloadCenterFollowing: false
+  downloadCenterCollapsed: false
 };
 
 const ASSET_VERSION = Date.now();
@@ -157,9 +156,6 @@ function wireEvents() {
       setDownloadCenterCollapsed(false);
     });
   }
-
-  window.addEventListener("scroll", syncFloatingDownloadCenter, { passive: true });
-  window.addEventListener("resize", syncFloatingDownloadCenter);
 
   els.selectAll.addEventListener("change", () => {
     document.querySelectorAll(".row-selector").forEach((checkbox) => {
@@ -1267,8 +1263,6 @@ function renderDownloadCenterCollapsedState() {
     els.downloadCenterPanel.classList.toggle("is-floating-collapsed", state.downloadCenterCollapsed);
   }
 
-  document.body.classList.toggle("has-floating-download-center", state.downloadCenterCollapsed);
-
   if (els.downloadCenterToggle) {
     els.downloadCenterToggle.textContent = state.downloadCenterCollapsed ? "Expand" : "Collapse";
     els.downloadCenterToggle.setAttribute("aria-expanded", String(!state.downloadCenterCollapsed));
@@ -1277,8 +1271,6 @@ function renderDownloadCenterCollapsedState() {
   if (els.downloadCenterFloatingToggle) {
     els.downloadCenterFloatingToggle.textContent = state.downloadCenterCollapsed ? "Expand" : "Collapse";
   }
-
-  syncFloatingDownloadCenter();
 }
 
 function restoreDownloadCenterCollapsed() {
@@ -1292,19 +1284,6 @@ function restoreDownloadCenterCollapsed() {
 
   state.downloadCenterCollapsed = storedValue === "1";
   renderDownloadCenterCollapsedState();
-}
-
-function syncFloatingDownloadCenter() {
-  if (!els.downloadCenterShell || !els.downloadCenterPanel) {
-    return;
-  }
-
-  const panelTop = els.downloadCenterPanel.getBoundingClientRect().top;
-  const shouldFollow = state.downloadCenterCollapsed && panelTop <= 18;
-  state.downloadCenterFollowing = shouldFollow;
-
-  els.downloadCenterShell.classList.toggle("is-following", shouldFollow);
-  document.body.classList.toggle("has-floating-download-center", shouldFollow);
 }
 
 function persistDownloadRoot(value) {
