@@ -3,45 +3,91 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>GoPro USB Footage App</title>
+    <title>Footage workspace · GoPro Export</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
-  <body>
-    <div class="page-shell">
-      <header class="hero">
-        <div class="hero-copy">
-          <p class="eyebrow">Open GoPro USB Offload</p>
-          <h1>Browse and download GoPro footage over USB-C from your PC.</h1>
-          <p class="hero-text">
-            This app follows the official Open GoPro USB flow: connect over the GoPro USB network link,
-            enable wired control, keep the camera awake, then list and offload media from the SD card.
-          </p>
-        </div>
-        <div class="hero-card">
-          <div class="hero-stat">
-            <span class="hero-label">Connection</span>
-            <strong id="hero-connection">Not connected</strong>
-          </div>
-          <div class="hero-stat">
-            <span class="hero-label">Download folder</span>
-            <strong id="hero-download-root">./downloads</strong>
-          </div>
-          <div class="hero-stat">
-            <span class="hero-label">Media loaded</span>
-            <strong id="hero-media-count">0 files</strong>
-          </div>
-          <div class="hero-actions">
-            <a class="link-pill" href="/">Home</a>
-            <button id="disconnect-btn" class="ghost-button" type="button">Disconnect</button>
-          </div>
-          <input id="download-root" type="hidden" value="./downloads">
-        </div>
+  <body class="workspace-page">
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <div class="page-shell workspace-shell">
+      <nav class="app-nav" aria-label="Main navigation">
+        <a class="brand" href="/" aria-label="GoPro Export home"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="13" rx="3"/><circle cx="15" cy="12.5" r="3.5"/><path d="M6 10h3M7 6V4h6v2"/></svg></span><span>GoPro<span class="brand-light"> Export</span></span></a>
+        <div class="nav-links"><a href="/">Connection</a><a href="/main" aria-current="page">Workspace</a></div>
+        <span class="local-label"><span class="status-dot" aria-hidden="true"></span> Local workspace</span>
+      </nav>
+      <header class="workspace-header">
+        <div><p class="eyebrow">YOUR CAMERA. YOUR MOMENTS.</p><h1>Footage workspace</h1><p class="hero-text">Find your favorites. Preview them. Bring them home.</p></div>
+        <div class="connection-control"><span class="connection-tag"><span class="status-dot" aria-hidden="true"></span><strong id="hero-connection">Not connected</strong></span><button id="disconnect-btn" class="ghost-button" type="button">Disconnect</button></div>
       </header>
+      <div class="workspace-stats">
+        <div class="workspace-stat"><span class="hero-label">On your camera</span><strong id="hero-media-count">0 files</strong></div>
+        <div class="workspace-stat folder-stat"><label class="hero-label" for="download-root">Save footage to</label><input id="download-root" class="folder-input" type="text" value="./downloads" spellcheck="false" aria-describedby="folder-save-hint"><span id="folder-save-hint" class="field-hint">Used for the next batch</span><strong id="hero-download-root" hidden>./downloads</strong></div>
+        <div class="workspace-stat"><span class="hero-label">Connection</span><strong>Wired USB-C</strong><span class="field-hint">Keep your camera plugged in</span></div>
+      </div>
 
-      <main class="layout">
+      <main id="main-content" class="layout" tabindex="-1">
+        <div id="workspace-feedback" class="workspace-feedback" role="alert" hidden></div>
+        <section id="footage-panel" class="panel panel-wide footage-panel">
+          <div class="panel-header"><div><h2>Your footage</h2><p class="section-copy">Select the files you want to save, or preview them first.</p></div>
+            <button id="refresh-media-btn" class="ghost-button" type="button">Refresh list</button>
+          </div>
+
+          <div class="media-workspace">
+            <div class="media-browser">
+              <div class="media-filters">
+                <label class="search-field"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><span class="sr-only">Search footage</span><input id="media-search" type="search" placeholder="Search by file name or folder…" autocomplete="off"></label>
+                <label class="type-filter"><span class="sr-only">Filter by media type</span><select id="media-type"><option value="all">All media</option><option value="Video">Videos</option><option value="Photo">Photos</option><option value="Other">Other files</option></select></label>
+              </div>
+              <div class="toolbar">
+                <label class="checkbox-line">
+                  <input id="select-all" type="checkbox">
+                  <span>Select visible</span>
+                </label>
+                <span id="selection-count" class="selection-count" role="status">0 selected</span><button id="download-selected-btn" class="primary-button" type="button" disabled>Queue selected</button>
+                <button id="download-all-btn" class="ghost-button" type="button">Queue all</button>
+              </div>
+
+              <div class="table-wrap" tabindex="0" role="region" aria-label="Camera footage">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col"><span class="sr-only">Select file</span></th>
+                      <th scope="col"><span class="sr-only">Thumbnail</span></th>
+                      <th scope="col">Name</th>
+                      <th scope="col">Type</th>
+                      <th scope="col">Folder</th>
+                      <th scope="col">Size</th>
+                      <th scope="col">Created</th>
+                      <th scope="col">Preview</th>
+                    </tr>
+                  </thead>
+                  <tbody id="media-body">
+                    <tr>
+                      <td colspan="8" class="empty-state">Connect to a camera to load media.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <aside class="preview-pane" aria-label="Media preview">
+              <div class="preview-pane-header">
+                <div>
+                  <div class="subheading">Preview</div>
+                  <h3 id="preview-title">Select a file</h3>
+                </div>
+                <button id="preview-download-btn" class="primary-button" type="button">Add to queue</button>
+              </div>
+              <div id="preview-body" class="preview-body is-empty">
+                Choose a photo or video and click <strong>Preview</strong> to inspect a lightweight version before downloading.
+              </div>
+              <div id="preview-meta" class="preview-meta"></div>
+            </aside>
+          </div>
+        </section>
+
         <section id="download-center-panel" class="panel panel-wide download-panel">
           <div class="panel-header">
-            <h2>Download Center</h2>
+            <div><h2>Download center</h2><p class="section-copy">Your next batch and current transfer, in one place.</p></div>
             <div class="download-panel-actions">
               <div class="download-pill-row">
                 <span id="download-badge" class="download-badge is-idle">Idle</span>
@@ -187,69 +233,14 @@
           </div>
         </section>
 
-        <section class="panel panel-wide">
-          <div class="panel-header">
-            <h2>Footage</h2>
-            <button id="refresh-media-btn" class="ghost-button" type="button">Refresh list</button>
-          </div>
-
-          <div class="media-workspace">
-            <div class="media-browser">
-              <div class="toolbar">
-                <label class="checkbox-line">
-                  <input id="select-all" type="checkbox">
-                  <span>Select all</span>
-                </label>
-                <button id="download-selected-btn" class="primary-button" type="button">Queue selected</button>
-                <button id="download-all-btn" class="ghost-button" type="button">Queue all</button>
-              </div>
-
-              <div class="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th></th>
-                      <th>Thumb</th>
-                      <th>Name</th>
-                      <th>Type</th>
-                      <th>Folder</th>
-                      <th>Size</th>
-                      <th>Created</th>
-                      <th>Preview</th>
-                    </tr>
-                  </thead>
-                  <tbody id="media-body">
-                    <tr>
-                      <td colspan="8" class="empty-state">Connect to a camera to load media.</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            <aside class="preview-pane">
-              <div class="preview-pane-header">
-                <div>
-                  <div class="subheading">Preview</div>
-                  <h3 id="preview-title">Select a file</h3>
-                </div>
-                <button id="preview-download-btn" class="primary-button" type="button">Add to queue</button>
-              </div>
-              <div id="preview-body" class="preview-body is-empty">
-                Choose a photo or video and click <strong>Preview</strong> to inspect a lightweight version before downloading.
-              </div>
-              <div id="preview-meta" class="preview-meta"></div>
-            </aside>
-          </div>
-        </section>
-
-        <section class="panel panel-wide">
+                <section class="panel panel-wide">
           <div class="panel-header">
             <h2>Activity</h2>
           </div>
-          <div id="activity-log" class="activity-log"></div>
+          <div id="activity-log" class="activity-log" role="log" aria-label="Workspace activity"></div>
         </section>
       </main>
+      <footer class="app-footer"><span>GoPro Export</span><span>Your footage stays on this computer.</span></footer>
     </div>
 
     <script src="/app.js" defer></script>

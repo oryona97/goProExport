@@ -4,7 +4,8 @@ const state = {
   session: null,
   docs: [],
   candidates: [],
-  activeTab: "connect"
+  activeTab: "connect",
+  connecting: false
 };
 
 const els = {
@@ -19,6 +20,8 @@ const els = {
   heroDownloadRoot: document.querySelector("#hero-download-root"),
   heroCandidateCount: document.querySelector("#hero-candidate-count"),
   connectForm: document.querySelector("#connect-form"),
+  connectBtn: document.querySelector("#connect-btn"),
+  feedback: document.querySelector("#connection-feedback"),
   discoverBtn: document.querySelector("#discover-btn"),
   disconnectBtn: document.querySelector("#disconnect-btn"),
   connectTab: document.querySelector("#home-tab-connect"),
@@ -59,6 +62,16 @@ function wireEvents() {
     setActiveTab("about");
   });
 
+  [els.connectTab, els.aboutTab].forEach((tab) => {
+    tab.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const next = event.key === "Home" ? "connect" : event.key === "End" ? "about" : state.activeTab === "about" ? "connect" : "about";
+      setActiveTab(next);
+      (next === "about" ? els.aboutTab : els.connectTab).focus();
+    });
+  });
+
   els.downloadRoot.addEventListener("input", () => {
     const value = els.downloadRoot.value.trim() || "./downloads";
     els.heroDownloadRoot.textContent = value;
@@ -87,37 +100,93 @@ async function refreshStatus() {
 }
 
 async function refreshCandidates(userInitiated = false) {
-  const response = await api("/api/discover");
-  state.candidates = response.candidates || [];
-  renderCandidates();
+  els.discoverBtn.disabled = true;
+  els.discoverBtn.textContent = "Scanning…";
+  try {
+    const response = await api("/api/discover");
+    state.candidates = response.candidates || [];
+    renderCandidates();
 
-  if (userInitiated) {
-    if (state.candidates.length) {
-      appendLog(`Found ${state.candidates.length} possible GoPro USB address${state.candidates.length === 1 ? "" : "es"}.`);
-    } else {
-      appendLog("No likely GoPro USB interface was detected yet.");
+    if (userInitiated) {
+      if (state.candidates.length) {
+        appendLog(`Found ${state.candidates.length} possible GoPro USB address${state.candidates.length === 1 ? "" : "es"}.`);
+      } else {
+        appendLog("No likely GoPro USB interface was detected yet.");
+      }
     }
+  } finally {
+    els.discoverBtn.disabled = false;
+    els.discoverBtn.textContent = "Scan for camera";
   }
 }
 
 async function connectCamera() {
+  if (state.connecting) return;
   const payload = {
     ip: els.cameraIp.value.trim(),
     serialSuffix: els.serialSuffix.value.trim()
   };
 
-  persistDownloadRoot(els.downloadRoot.value.trim() || "./downloads");
-  appendLog("Connecting to GoPro over USB...");
+  clearConnectionErrors();
+  const errors = [];
+  if (payload.ip && !isValidCameraIp(payload.ip)) {
+    errors.push({ field: "camera-ip", error: "ip-error", message: "Enter an IPv4 address, such as 172.27.189.51." });
+  }
+  if (!payload.ip && payload.serialSuffix && !/^\d{3}$/.test(payload.serialSuffix)) {
+    errors.push({ field: "serial-suffix", error: "serial-error", message: "Enter exactly 3 digits from your camera serial number." });
+  }
+  if (errors.length) {
+    errors.forEach(({ field, error, message }) => {
+      document.getElementById(field).setAttribute("aria-invalid", "true");
+      const hint = document.getElementById(error);
+      hint.textContent = message;
+      hint.hidden = false;
+    });
+    els.feedback.innerHTML = `<strong>Check your camera details</strong><ul>${errors.map(({ field, message }) => `<li><a href="#${field}">${escapeHtml(message)}</a></li>`).join("")}</ul>`;
+    els.feedback.hidden = false;
+    els.feedback.focus();
+    return;
+  }
 
-  const response = await api("/api/connect", {
-    method: "POST",
-    body: payload
-  });
+  state.connecting = true;
+  els.connectBtn.disabled = true;
+  els.connectBtn.textContent = "Connecting to camera…";
+  els.connectForm.setAttribute("aria-busy", "true");
+  try {
+    persistDownloadRoot(els.downloadRoot.value.trim() || "./downloads");
+    appendLog("Connecting to GoPro over USB...");
 
-  state.session = response.session;
-  renderSession();
-  appendLog(`Connected to ${state.session.cameraName || state.session.ip}. Opening the main page...`);
-  redirectToMain();
+    const response = await api("/api/connect", {
+      method: "POST",
+      body: payload
+    });
+
+    state.session = response.session;
+    renderSession();
+    appendLog(`Connected to ${state.session.cameraName || state.session.ip}. Opening the main page...`);
+    redirectToMain();
+  } catch (error) {
+    els.feedback.textContent = error instanceof Error ? error.message : String(error);
+    els.feedback.hidden = false;
+    els.feedback.focus();
+    appendLog(els.feedback.textContent);
+  } finally {
+    state.connecting = false;
+    els.connectBtn.disabled = false;
+    els.connectBtn.innerHTML = 'Connect to GoPro <span aria-hidden="true">→</span>';
+    els.connectForm.setAttribute("aria-busy", "false");
+  }
+}
+
+function isValidCameraIp(value) {
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(value) && value.split(".").every((octet) => Number(octet) <= 255);
+}
+
+function clearConnectionErrors() {
+  els.feedback.hidden = true;
+  els.feedback.textContent = "";
+  [els.cameraIp, els.serialSuffix].forEach((input) => input.removeAttribute("aria-invalid"));
+  ["ip-error", "serial-error"].forEach((id) => { document.getElementById(id).hidden = true; });
 }
 
 async function disconnectCamera() {
@@ -149,7 +218,7 @@ function renderCandidates() {
   els.heroCandidateCount.textContent = `${state.candidates.length} detected`;
 
   if (!state.candidates.length) {
-    els.candidateList.innerHTML = `<div class="candidate-empty">No likely USB candidate detected yet.</div>`;
+    els.candidateList.innerHTML = `<div class="candidate-empty">No camera found yet. Plug in your GoPro and scan again, or enter its details below.</div>`;
     return;
   }
 
@@ -164,6 +233,8 @@ function renderCandidates() {
     `;
     button.addEventListener("click", () => {
       els.cameraIp.value = candidate.ip;
+      clearConnectionErrors();
+      els.cameraIp.focus();
       appendLog(`Filled camera IP with detected candidate ${candidate.ip}.`);
     });
     els.candidateList.appendChild(button);
@@ -204,6 +275,8 @@ function renderTabs() {
   els.aboutTab.classList.toggle("is-active", isAbout);
   els.connectTab.setAttribute("aria-selected", String(!isAbout));
   els.aboutTab.setAttribute("aria-selected", String(isAbout));
+  els.connectTab.tabIndex = isAbout ? -1 : 0;
+  els.aboutTab.tabIndex = isAbout ? 0 : -1;
   els.connectPanel.hidden = isAbout;
   els.aboutPanel.hidden = !isAbout;
 }
@@ -247,7 +320,10 @@ async function runUiTask(task) {
   try {
     await task();
   } catch (error) {
-    appendLog(error instanceof Error ? error.message : String(error));
+    const message = error instanceof Error ? error.message : String(error);
+    appendLog(message);
+    els.feedback.textContent = message;
+    els.feedback.hidden = false;
   }
 }
 

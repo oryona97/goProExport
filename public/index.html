@@ -1,122 +1,88 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>GoPro USB Connection Home</title>
-    <link rel="stylesheet" href="/styles.css">
-  </head>
-  <body>
-    <div class="page-shell home-shell">
-      <header class="hero">
-        <div class="hero-copy">
-          <p class="eyebrow">GoPro USB Connection Home</p>
-          <h1>Connect the camera here, then jump straight into the main footage workspace.</h1>
-          <p class="hero-text">
-            Power on the GoPro, connect it over USB-C, then use the Open GoPro wired flow below.
-            As soon as the camera session is active, the app redirects you to the main page automatically.
-          </p>
-          <div class="hero-actions">
-            <a class="link-pill" href="/main">Open main page</a>
-            <span class="hero-note">Already connected? This page will send you there automatically.</span>
-          </div>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f7fa">
+  <title>Connect your camera · GoPro Export</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="home-page">
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <div class="page-shell home-shell">
+    <nav class="app-nav" aria-label="Main navigation">
+      <a class="brand" href="/" aria-label="GoPro Export home"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="13" rx="3"/><circle cx="15" cy="12.5" r="3.5"/><path d="M6 10h3M7 6V4h6v2"/></svg></span><span>GoPro<span class="brand-light"> Export</span></span></a>
+      <div class="nav-links"><a href="/" aria-current="page">Connection</a><a href="/main">Workspace</a></div>
+      <span class="local-label"><span class="status-dot" aria-hidden="true"></span> Local workspace</span>
+    </nav>
+    <header class="home-intro">
+      <p class="eyebrow">FROM CAMERA TO COMPUTER</p>
+      <h1>Your next edit starts here.</h1>
+      <p class="hero-text">Connect your GoPro, preview the good stuff, and bring it home.</p>
+    </header>
+    <main id="main-content" class="home-layout" tabindex="-1">
+      <section class="panel home-tabs-panel" aria-label="Camera connection">
+        <div class="tab-row" role="tablist" aria-label="Connection information">
+          <button id="home-tab-connect" class="tab-button is-active" type="button" role="tab" aria-selected="true" aria-controls="home-panel-connect">Connect camera</button>
+          <button id="home-tab-about" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="home-panel-about" tabindex="-1">How it works</button>
         </div>
-        <div class="hero-card">
-          <div class="hero-stat">
-            <span class="hero-label">Session</span>
-            <strong id="hero-connection">Ready to connect</strong>
+        <div id="home-panel-connect" class="tab-panel" role="tabpanel" aria-labelledby="home-tab-connect">
+          <div class="panel-header"><div><h2>Let’s get connected.</h2><p class="section-copy">Choose a detected camera or enter its details.</p></div></div>
+          <div class="discovery-section">
+            <div class="panel-header"><span class="subheading">Detected cameras</span><button id="discover-btn" class="ghost-button" type="button">Scan for camera</button></div>
+            <div id="candidate-list" class="candidate-list"></div>
+            <span id="hero-candidate-count" class="field-hint">0 detected</span>
           </div>
-          <div class="hero-stat">
-            <span class="hero-label">Download folder</span>
-            <strong id="hero-download-root">./downloads</strong>
-          </div>
-          <div class="hero-stat">
-            <span class="hero-label">USB candidates</span>
-            <strong id="hero-candidate-count">0 detected</strong>
-          </div>
+          <form id="connect-form" class="stack" novalidate>
+            <div id="connection-feedback" class="form-feedback" role="alert" tabindex="-1" hidden></div>
+            <div class="field-pair">
+              <label class="field"><span id="camera-ip-label">Camera IP address</span><input aria-labelledby="camera-ip-label" id="camera-ip" type="text" placeholder="e.g. 172.27.189.51" aria-describedby="ip-hint ip-error" autocomplete="off" spellcheck="false"><small id="ip-hint" class="field-hint">Use the detected address above.</small><small id="ip-error" class="field-error" hidden></small></label>
+              <label class="field"><span id="serial-label">Or last 3 serial digits</span><input aria-labelledby="serial-label" id="serial-suffix" type="text" inputmode="numeric" maxlength="3" placeholder="e.g. 789" aria-describedby="serial-hint serial-error" autocomplete="off"><small id="serial-hint" class="field-hint">Found on your camera.</small><small id="serial-error" class="field-error" hidden></small></label>
+            </div>
+            <label class="field"><span id="folder-label">Save footage to</span><input aria-labelledby="folder-label" id="download-root" type="text" value="./downloads" aria-describedby="folder-hint" spellcheck="false"><small id="folder-hint" class="field-hint">A folder on this computer. You can change it anytime.</small></label>
+            <button id="connect-btn" class="primary-button connect-button" type="submit">Connect to GoPro <span aria-hidden="true">→</span></button>
+            <p class="form-note">The footage workspace opens when you’re connected.</p>
+            <button id="disconnect-btn" class="ghost-button" type="button" hidden>Disconnect</button>
+          </form>
+          <div class="status-box"><span class="status-dot" aria-hidden="true"></span><div><strong id="hero-connection">Ready to connect</strong><div id="session-summary" class="status-content">No active session.</div></div></div>
+          <span id="hero-download-root" hidden>./downloads</span>
         </div>
-      </header>
-
-      <main class="layout home-layout">
-        <section class="panel panel-wide home-tabs-panel">
-          <div class="tab-row" role="tablist" aria-label="Home tabs">
-            <button id="home-tab-connect" class="tab-button is-active" type="button" role="tab" aria-selected="true" aria-controls="home-panel-connect">Connect</button>
-            <button id="home-tab-about" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="home-panel-about">About</button>
-          </div>
-
-          <div id="home-panel-connect" class="tab-panel" role="tabpanel" aria-labelledby="home-tab-connect">
-            <div class="panel-header">
-              <h2>Connect over USB-C</h2>
-              <button id="discover-btn" class="ghost-button" type="button">Scan USB candidates</button>
-            </div>
-
-            <form id="connect-form" class="stack">
-              <label class="field">
-                <span>Camera IP</span>
-                <input id="camera-ip" type="text" placeholder="172.27.189.51">
-              </label>
-
-              <label class="field">
-                <span>Or last 3 serial digits</span>
-                <input id="serial-suffix" type="text" maxlength="3" placeholder="789">
-              </label>
-
-              <label class="field">
-                <span>Download root</span>
-                <input id="download-root" type="text" value="./downloads">
-              </label>
-
-              <div class="button-row">
-                <button id="connect-btn" class="primary-button" type="submit">Connect to GoPro</button>
-                <button id="disconnect-btn" class="ghost-button" type="button">Disconnect</button>
-              </div>
-            </form>
-
-            <div>
-              <div class="subheading">Detected USB candidates</div>
-              <div id="candidate-list" class="candidate-list"></div>
-            </div>
-
-            <div class="status-box">
-              <div class="subheading">Connection status</div>
-              <div id="session-summary" class="status-content">No active session.</div>
-            </div>
-          </div>
-
-          <div id="home-panel-about" class="tab-panel" role="tabpanel" aria-labelledby="home-tab-about" hidden>
-            <div class="panel-header">
-              <h2>Official doc checkpoints</h2>
-              <a class="link-pill" href="https://gopro.github.io/OpenGoPro/http" target="_blank" rel="noreferrer">Open GoPro HTTP spec</a>
-            </div>
-            <div id="docs-grid" class="docs-grid"></div>
-          </div>
-        </section>
-
-        <section class="panel panel-wide">
-          <div class="panel-header">
-            <h2>Before you connect</h2>
-          </div>
-
-          <div class="home-checklist">
-            <article class="home-note-card">
-              <div class="subheading">Quick runbook</div>
-              <ul class="checklist">
-                <li>Connect the camera over USB-C and wait for the network interface to appear.</li>
-                <li>Use a detected candidate IP if the app finds one for you.</li>
-                <li>Set the download root once and the app keeps it for the main page.</li>
-                <li>When the session turns healthy, the app opens the main workspace automatically.</li>
-              </ul>
-            </article>
-
-            <div>
-              <div class="subheading">Connection activity</div>
-              <div id="activity-log" class="activity-log activity-log-tall"></div>
-            </div>
-          </div>
-        </section>
-      </main>
-    </div>
-
-    <script src="/home.js" defer></script>
-  </body>
+        <div id="home-panel-about" class="tab-panel" role="tabpanel" aria-labelledby="home-tab-about" tabindex="0" hidden>
+          <div class="panel-header"><div><h2>Made for Open GoPro.</h2><p class="section-copy">Use a camera that supports wired USB control.</p></div></div>
+          <div id="docs-grid" class="docs-grid"></div>
+          <a class="link-pill docs-link" href="https://gopro.github.io/OpenGoPro/http" target="_blank" rel="noreferrer">Read the Open GoPro documentation <span aria-hidden="true">↗</span></a>
+        </div>
+      </section>
+      <aside class="setup-guide" aria-label="Camera setup guide">
+        <div class="camera-scene" aria-hidden="true">
+          <span class="scene-label">READY FOR YOUR NEXT ADVENTURE</span>
+          <svg class="camera-art" viewBox="0 0 400 250" fill="none">
+            <path d="M200 194v28h74c22 0 38-10 38-30v-21" stroke="currentColor" stroke-width="4" stroke-linecap="round"/>
+            <rect x="82" y="52" width="237" height="143" rx="24" fill="#202b3c" stroke="#43526a" stroke-width="2"/>
+            <rect x="95" y="66" width="211" height="111" rx="15" fill="#2d394c"/>
+            <rect x="113" y="82" width="80" height="64" rx="8" fill="#142033" stroke="#52617a"/>
+            <path d="m118 131 24-22 15 13 16-20 15 29" stroke="#66c9dd" stroke-width="2"/><circle cx="133" cy="97" r="5" fill="#66c9dd"/>
+            <rect x="209" y="73" width="84" height="84" rx="18" fill="#172132" stroke="#52617a"/>
+            <circle cx="251" cy="115" r="31" fill="#0b1424" stroke="#62718a" stroke-width="3"/><circle cx="251" cy="115" r="22" fill="#1d344f" stroke="#334f71" stroke-width="2"/><circle cx="251" cy="115" r="12" fill="#0a1425"/><path d="M237 98a23 23 0 0 1 28 4" stroke="#83c5ea" stroke-width="3" stroke-linecap="round"/>
+            <rect x="112" y="158" width="12" height="6" rx="2" fill="#60a5fa"/><rect x="129" y="158" width="12" height="6" rx="2" fill="#38bdf8"/><rect x="146" y="158" width="12" height="6" rx="2" fill="#67e8f9"/>
+            <rect x="112" y="44" width="44" height="8" rx="4" fill="#52617a"/><circle cx="287" cy="60" r="3" fill="#f87171"/>
+          </svg>
+          <span class="scene-caption"><span class="status-dot" aria-hidden="true"></span> USB-C connection</span>
+        </div>
+        <div class="guide-copy">
+          <h2>Three steps. All your footage.</h2>
+          <ol class="setup-steps">
+            <li><span class="step-number">01</span><div><strong>Plug in &amp; power on</strong><p>Connect your camera with a USB-C data cable.</p></div></li>
+            <li><span class="step-number">02</span><div><strong>Find your camera</strong><p>Scan for a camera, or enter its address below.</p></div></li>
+            <li><span class="step-number">03</span><div><strong>Make it yours</strong><p>Preview, queue, and save your favorite moments.</p></div></li>
+          </ol>
+          <p class="guide-note">Your footage stays on your computer. No cloud upload.</p>
+        </div>
+      </aside>
+      <details class="panel activity-panel"><summary>Connection activity</summary><div id="activity-log" class="activity-log" role="log" aria-label="Connection activity"></div></details>
+    </main>
+    <footer class="app-footer"><span>GoPro Export</span><span>A little less waiting. A lot more creating.</span></footer>
+  </div>
+  <script src="/home.js" defer></script>
+</body>
 </html>

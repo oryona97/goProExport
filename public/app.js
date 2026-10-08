@@ -1,6 +1,7 @@
 const state = {
   session: null,
   media: [],
+  selectedPaths: new Set(),
   docs: [],
   candidates: [],
   preview: {
@@ -31,6 +32,9 @@ const els = {
   serialSuffix: document.querySelector("#serial-suffix"),
   downloadRoot: document.querySelector("#download-root"),
   selectAll: document.querySelector("#select-all"),
+  mediaSearch: document.querySelector("#media-search"),
+  mediaType: document.querySelector("#media-type"),
+  selectionCount: document.querySelector("#selection-count"),
   heroConnection: document.querySelector("#hero-connection"),
   heroDownloadRoot: document.querySelector("#hero-download-root"),
   heroMediaCount: document.querySelector("#hero-media-count"),
@@ -117,7 +121,15 @@ function wireEvents() {
   }
 
   els.refreshMediaBtn.addEventListener("click", () => {
-    void runUiTask(refreshMedia);
+    void runUiTask(async () => {
+      els.refreshMediaBtn.disabled = true;
+      els.refreshMediaBtn.textContent = "Refreshing…";
+      try { await refreshMedia(); }
+      finally {
+        els.refreshMediaBtn.disabled = false;
+        els.refreshMediaBtn.textContent = "Refresh list";
+      }
+    });
   });
 
   els.downloadSelectedBtn.addEventListener("click", () => {
@@ -160,7 +172,19 @@ function wireEvents() {
   els.selectAll.addEventListener("change", () => {
     document.querySelectorAll(".row-selector").forEach((checkbox) => {
       checkbox.checked = els.selectAll.checked;
+      if (checkbox.checked) state.selectedPaths.add(checkbox.dataset.path);
+      else state.selectedPaths.delete(checkbox.dataset.path);
     });
+    renderSelection();
+  });
+
+  els.mediaSearch.addEventListener("input", renderMedia);
+  els.mediaType.addEventListener("change", renderMedia);
+  els.mediaBody.addEventListener("change", (event) => {
+    if (!event.target.matches(".row-selector")) return;
+    if (event.target.checked) state.selectedPaths.add(event.target.dataset.path);
+    else state.selectedPaths.delete(event.target.dataset.path);
+    renderSelection();
   });
 
   els.downloadRoot.addEventListener("input", () => {
@@ -280,6 +304,10 @@ async function refreshMedia(logResult = true) {
 
   const response = await api("/api/media");
   state.media = response.files || [];
+  const availablePaths = new Set(state.media.map((file) => file.path));
+  state.selectedPaths.forEach((filePath) => {
+    if (!availablePaths.has(filePath)) state.selectedPaths.delete(filePath);
+  });
   syncPreviewSelection();
   renderMedia();
 
@@ -552,13 +580,28 @@ async function previewFile(filePath) {
 }
 
 function getSelectedFiles() {
-  const selectedPaths = new Set(
-    Array.from(document.querySelectorAll(".row-selector"))
-      .filter((checkbox) => checkbox.checked)
-      .map((checkbox) => checkbox.dataset.path)
-  );
+  return state.media.filter((file) => state.selectedPaths.has(file.path));
+}
 
-  return state.media.filter((file) => selectedPaths.has(file.path));
+function getVisibleMedia() {
+  const query = els.mediaSearch.value.trim().toLowerCase();
+  const type = els.mediaType.value;
+  return state.media.filter((file) => {
+    const typeMatches = type === "all" || (type === "Other" ? !["Photo", "Video"].includes(file.type) : file.type === type);
+    return typeMatches && (!query || `${file.name} ${file.directory}`.toLowerCase().includes(query));
+  });
+}
+
+function renderSelection() {
+  const visible = getVisibleMedia();
+  const selectedVisible = visible.filter((file) => state.selectedPaths.has(file.path)).length;
+  const count = getSelectedFiles().length;
+  els.selectAll.checked = visible.length > 0 && selectedVisible === visible.length;
+  els.selectAll.indeterminate = selectedVisible > 0 && selectedVisible < visible.length;
+  els.selectAll.disabled = !visible.length;
+  els.selectionCount.textContent = `${count} selected`;
+  els.downloadSelectedBtn.disabled = !count || !state.session;
+  els.downloadAllBtn.disabled = !state.media.length || !state.session;
 }
 
 function renderDocs() {
@@ -638,20 +681,27 @@ function renderSession() {
 
 function renderMedia() {
   els.heroMediaCount.textContent = `${state.media.length} file${state.media.length === 1 ? "" : "s"}`;
+  const visibleMedia = getVisibleMedia();
+  renderSelection();
 
   if (!state.media.length) {
     els.mediaBody.innerHTML = `<tr><td colspan="8" class="empty-state">${state.session ? "No media returned by the camera yet." : "Connect to a camera to load media."}</td></tr>`;
     return;
   }
 
-  els.mediaBody.innerHTML = state.media
+  if (!visibleMedia.length) {
+    els.mediaBody.innerHTML = '<tr><td colspan="8" class="empty-state">No matching footage. Try another search or choose All media.</td></tr>';
+    return;
+  }
+
+  els.mediaBody.innerHTML = visibleMedia
     .map((file) => {
       const isActivePreview = Boolean(state.preview.file && state.preview.file.path === file.path);
       const thumbnailUrl = buildMediaThumbnailUrl(file);
 
       return `
         <tr class="${isActivePreview ? "is-active-row" : ""}">
-          <td><input class="row-selector" type="checkbox" data-path="${escapeHtml(file.path)}"></td>
+          <td><input class="row-selector" type="checkbox" aria-label="Select ${escapeHtml(file.name)}" data-path="${escapeHtml(file.path)}" ${state.selectedPaths.has(file.path) ? "checked" : ""}></td>
           <td>
             ${thumbnailUrl ? `<img class="media-thumb" src="${escapeHtml(thumbnailUrl)}" alt="Thumbnail for ${escapeHtml(file.name)}" loading="lazy" data-fallback-label="${escapeHtml(file.type.slice(0, 1) || "?")}">` : `<div class="media-thumb media-thumb-empty">${escapeHtml(file.type.slice(0, 1) || "?")}</div>`}
           </td>
@@ -661,7 +711,7 @@ function renderMedia() {
           <td>${formatBytes(file.sizeBytes)}</td>
           <td>${formatUnix(file.createdUnix)}</td>
           <td>
-            <button class="ghost-button preview-action" type="button" data-path="${escapeHtml(file.path)}" ${file.preview && file.preview.available ? "" : "disabled"}>
+            <button class="ghost-button preview-action" type="button" aria-label="Preview ${escapeHtml(file.name)}" data-path="${escapeHtml(file.path)}" ${file.preview && file.preview.available ? "" : "disabled"}>
               ${file.preview && file.preview.available ? "Preview" : "Unavailable"}
             </button>
           </td>
@@ -1315,10 +1365,15 @@ function redirectToHome() {
 }
 
 async function runUiTask(task) {
+  const feedback = document.querySelector("#workspace-feedback");
+  feedback.hidden = true;
   try {
     await task();
   } catch (error) {
-    appendLog(error instanceof Error ? error.message : String(error));
+    const message = error instanceof Error ? error.message : String(error);
+    appendLog(message);
+    feedback.textContent = message;
+    feedback.hidden = false;
   }
 }
 
