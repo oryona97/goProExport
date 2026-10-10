@@ -93,8 +93,7 @@ async function refreshStatus() {
   renderCandidates();
   renderSession();
 
-  if (state.session) {
-    appendLog(`Connected to ${state.session.cameraName || state.session.ip}. Redirecting to the main page...`);
+  if (state.session || response.recoverableJobs?.length || response.activeDownloadJob) {
     redirectToMain();
   }
 }

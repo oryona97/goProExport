@@ -20,12 +20,26 @@
       </header>
       <div class="workspace-stats">
         <div class="workspace-stat"><span class="hero-label">On your camera</span><strong id="hero-media-count">0 files</strong></div>
-        <div class="workspace-stat folder-stat"><label class="hero-label" for="download-root">Save footage to</label><input id="download-root" class="folder-input" type="text" value="./downloads" spellcheck="false" aria-describedby="folder-save-hint"><span id="folder-save-hint" class="field-hint">Used for the next batch</span><strong id="hero-download-root" hidden>./downloads</strong></div>
+        <div class="workspace-stat folder-stat" id="local-folder-settings"><label class="hero-label" for="download-root">Local folder</label><input id="download-root" class="folder-input" type="text" value="./downloads" spellcheck="false" aria-describedby="folder-save-hint"><span id="folder-save-hint" class="field-hint">Used for the next batch</span><strong id="hero-download-root" hidden>./downloads</strong></div>
         <div class="workspace-stat"><span class="hero-label">Connection</span><strong>Wired USB-C</strong><span class="field-hint">Keep your camera plugged in</span></div>
       </div>
 
       <main id="main-content" class="layout" tabindex="-1">
         <div id="workspace-feedback" class="workspace-feedback" role="alert" hidden></div>
+        <section class="panel panel-wide" aria-labelledby="saving-preferences-title">
+          <div class="panel-header"><div><h2 id="saving-preferences-title">Where to save</h2><p class="section-copy">Original videos, grouped by the day they were recorded.</p></div></div>
+          <div class="save-preferences">
+            <div><label for="save-destination">Save destination</label><select id="save-destination"><option value="local">Local folder</option><option value="google-drive">Google Drive</option></select></div>
+            <div><label for="recording-timezone">Recording timezone</label><input id="recording-timezone" type="text" spellcheck="false" aria-describedby="timezone-hint"><span id="timezone-hint" class="field-hint">Defaults to this computer's timezone. Used for the next batch.</span></div>
+          </div>
+          <div id="google-settings" class="google-settings" hidden>
+            <div class="google-account-summary"><div><span class="hero-label">Google account</span><strong id="google-account">Not connected</strong></div><div><span class="hero-label">Destination folder</span><strong id="google-folder">Choose a folder</strong></div></div>
+            <div class="button-row"><button id="google-connect" class="primary-button" type="button">Connect Google Drive</button><button id="google-disconnect" class="ghost-button" type="button" hidden>Disconnect Google Drive</button><button id="google-picker" class="ghost-button" type="button" disabled>Choose existing folder</button><button id="google-default-folder" class="ghost-button" type="button" disabled>Create GoPro Exports folder</button></div>
+            <p id="google-status" class="field-hint" role="status">Connect your Google account to save original videos.</p>
+            <button id="google-cancel" class="ghost-button" type="button" hidden>Cancel sign-in</button>
+            <div class="save-preferences"><div><label for="staging-root">Temporary storage folder</label><input id="staging-root" type="text" placeholder="App's default folder on this computer" spellcheck="false"><span class="field-hint">One original at a time. Failed uploads stay here until retry or discard.</span></div></div>
+          </div>
+        </section>
         <section id="footage-panel" class="panel panel-wide footage-panel">
           <div class="panel-header"><div><h2>Your footage</h2><p class="section-copy">Select the files you want to save, or preview them first.</p></div>
             <button id="refresh-media-btn" class="ghost-button" type="button">Refresh list</button>
@@ -35,7 +49,7 @@
             <div class="media-browser">
               <div class="media-filters">
                 <label class="search-field"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><span class="sr-only">Search footage</span><input id="media-search" type="search" placeholder="Search by file name or folder…" autocomplete="off"></label>
-                <label class="type-filter"><span class="sr-only">Filter by media type</span><select id="media-type"><option value="all">All media</option><option value="Video">Videos</option><option value="Photo">Photos</option><option value="Other">Other files</option></select></label>
+                <label class="type-filter"><span class="sr-only">Filter by media type</span><select id="media-type"><option value="Video">Original videos</option></select></label>
               </div>
               <div class="toolbar">
                 <label class="checkbox-line">
@@ -78,7 +92,7 @@
                 <button id="preview-download-btn" class="primary-button" type="button">Add to queue</button>
               </div>
               <div id="preview-body" class="preview-body is-empty">
-                Choose a photo or video and click <strong>Preview</strong> to inspect a lightweight version before downloading.
+                Choose a video and click <strong>Preview</strong> to inspect a lightweight version before saving the original.
               </div>
               <div id="preview-meta" class="preview-meta"></div>
             </aside>
@@ -87,7 +101,7 @@
 
         <section id="download-center-panel" class="panel panel-wide download-panel">
           <div class="panel-header">
-            <div><h2>Download center</h2><p class="section-copy">Your next batch and current transfer, in one place.</p></div>
+            <div><h2>Save center</h2><p class="section-copy">Your next batch, current transfer, and recovery controls.</p></div>
             <div class="download-panel-actions">
               <div class="download-pill-row">
                 <span id="download-badge" class="download-badge is-idle">Idle</span>
@@ -106,9 +120,19 @@
           </div>
           <div id="download-center-shell" class="download-center">
             <div id="download-status-card" class="download-status-card is-idle">
+              <div id="recovery-settings" class="batch-controls" hidden>
+                <label for="recovery-batch">Unfinished batches</label>
+                <select id="recovery-batch"></select>
+              </div>
+              <div class="button-row batch-controls">
+                <button id="pause-batch-btn" class="ghost-button" type="button" hidden>Pause batch</button>
+                <button id="resume-batch-btn" class="primary-button" type="button" hidden>Resume batch</button>
+                <button id="retry-batch-btn" class="primary-button" type="button" hidden>Retry failed</button>
+                <button id="discard-batch-btn" class="ghost-button" type="button" hidden>Discard unfinished</button>
+              </div>
               <div class="download-folded-bar">
                 <div class="download-folded-primary">
-                  <div class="subheading">Download Bar</div>
+                    <div class="subheading">Save progress</div>
                   <div class="download-folded-title" id="folded-file-name">Nothing downloading</div>
                   <div class="download-folded-copy" id="folded-file-meta">Queue files to get started.</div>
                 </div>
@@ -118,7 +142,7 @@
                     <strong id="folded-status">Idle</strong>
                   </article>
                   <article class="download-mini-stat">
-                    <span>Downloaded</span>
+                    <span>Transferred</span>
                     <strong id="folded-downloaded">0 B of 0 B</strong>
                   </article>
                   <article class="download-mini-stat">
@@ -166,7 +190,7 @@
                     <strong id="stat-transferred">0 B</strong>
                   </article>
                   <article class="download-stat-card">
-                    <span>Download root</span>
+                    <span>Destination</span>
                     <strong id="stat-download-root">./downloads</strong>
                   </article>
                 </div>
@@ -240,7 +264,7 @@
           <div id="activity-log" class="activity-log" role="log" aria-label="Workspace activity"></div>
         </section>
       </main>
-      <footer class="app-footer"><span>GoPro Export</span><span>Your footage stays on this computer.</span></footer>
+      <footer class="app-footer"><span>GoPro Export</span><span>Your originals. Your chosen destination.</span></footer>
     </div>
 
     <script src="/app.js" defer></script>
