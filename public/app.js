@@ -15,7 +15,10 @@ const state = {
   queueSequence: 0,
   downloadJob: null,
   downloadPollTimer: null,
-  downloadCenterCollapsed: false
+  downloadCenterCollapsed: false,
+  recoverableJobs: [],
+  google: null,
+  authorizationPollTimer: null
 };
 
 const ASSET_VERSION = Date.now();
@@ -31,6 +34,18 @@ const els = {
   cameraIp: document.querySelector("#camera-ip"),
   serialSuffix: document.querySelector("#serial-suffix"),
   downloadRoot: document.querySelector("#download-root"),
+  saveDestination: document.querySelector("#save-destination"),
+  recordingTimezone: document.querySelector("#recording-timezone"),
+  stagingRoot: document.querySelector("#staging-root"),
+  googleSettings: document.querySelector("#google-settings"),
+  googleAccount: document.querySelector("#google-account"),
+  googleFolder: document.querySelector("#google-folder"),
+  googleStatus: document.querySelector("#google-status"),
+  googleConnect: document.querySelector("#google-connect"),
+  googleDisconnect: document.querySelector("#google-disconnect"),
+  googlePicker: document.querySelector("#google-picker"),
+  googleDefaultFolder: document.querySelector("#google-default-folder"),
+  googleCancel: document.querySelector("#google-cancel"),
   selectAll: document.querySelector("#select-all"),
   mediaSearch: document.querySelector("#media-search"),
   mediaType: document.querySelector("#media-type"),
@@ -73,6 +88,12 @@ const els = {
   activeJobList: document.querySelector("#active-job-list"),
   downloadSummary: document.querySelector("#download-summary"),
   startQueueBtn: document.querySelector("#start-queue-btn"),
+  resumeBatchBtn: document.querySelector("#resume-batch-btn"),
+  pauseBatchBtn: document.querySelector("#pause-batch-btn"),
+  discardBatchBtn: document.querySelector("#discard-batch-btn"),
+  retryBatchBtn: document.querySelector("#retry-batch-btn"),
+  recoverySettings: document.querySelector("#recovery-settings"),
+  recoveryBatch: document.querySelector("#recovery-batch"),
   clearQueueBtn: document.querySelector("#clear-queue-btn"),
   queueTitle: document.querySelector("#queue-title"),
   queueSummary: document.querySelector("#queue-summary"),
@@ -85,22 +106,43 @@ const els = {
 
 window.addEventListener("DOMContentLoaded", async () => {
   restoreDownloadRoot();
+  els.recordingTimezone.value = localStorage.getItem("gopro.recordingTimezone") || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  els.stagingRoot.value = localStorage.getItem("gopro.stagingRoot") || "";
   restoreDownloadCenterCollapsed();
   wireEvents();
   renderPreview();
   renderDownloadJob();
   renderPendingQueue();
   await runUiTask(async () => {
-    await Promise.all([loadDocs(), refreshStatus()]);
+    await Promise.all([loadDocs(), refreshStatus(), refreshGoogleStatus()]);
   });
 });
 
 window.addEventListener("beforeunload", () => {
   stopDownloadPolling();
   revokePreviewObjectUrl();
+  clearInterval(state.authorizationPollTimer);
 });
 
 function wireEvents() {
+  els.googleCancel.addEventListener('click', () => runUiTask(async () => {
+    await api('/api/cloud/google/cancel-authorization', { method: 'POST', body: {} });
+    await refreshGoogleStatus();
+  }));
+  els.saveDestination.addEventListener("change", () => { renderSavingPreferences(); renderPendingQueue(); });
+  els.stagingRoot.addEventListener("change", () => localStorage.setItem("gopro.stagingRoot", els.stagingRoot.value.trim()));
+  els.googleConnect.addEventListener("click", () => { void runUiTask(() => authorizeGoogle(false)); });
+  els.googlePicker.addEventListener("click", () => { void runUiTask(() => authorizeGoogle(true)); });
+  els.googleDefaultFolder.addEventListener("click", () => { void runUiTask(async () => {
+    els.googleDefaultFolder.disabled = true;
+    try { await api("/api/cloud/google/folder", { method: "POST", body: {} }); }
+    finally { await refreshGoogleStatus(); }
+  }); });
+  els.googleDisconnect.addEventListener("click", () => { void runUiTask(async () => {
+    await api("/api/cloud/google/disconnect", { method: "POST", body: {} });
+    await refreshGoogleStatus();
+  }); });
+  els.recordingTimezone.addEventListener("change", () => localStorage.setItem("gopro.recordingTimezone", els.recordingTimezone.value.trim()));
   if (els.connectForm) {
     els.connectForm.addEventListener("submit", (event) => {
       event.preventDefault();
@@ -208,10 +250,56 @@ async function loadDocs() {
   renderDocs();
 }
 
+async function refreshGoogleStatus() {
+  state.google = await api("/api/cloud/google/status");
+  renderSavingPreferences();
+  renderPendingQueue();
+}
+
+function renderSavingPreferences() {
+  const cloud = els.saveDestination.value === "google-drive";
+  els.googleSettings.hidden = !cloud;
+  document.querySelector("#local-folder-settings").hidden = cloud;
+  const google = state.google;
+  els.googleCancel.hidden = !google?.authorizationPending;
+  els.googleAccount.textContent = google?.account?.email || "Not connected";
+  els.googleFolder.textContent = google?.folder?.name || "Choose a folder";
+  els.googleConnect.textContent = google?.connected ? google.canSwitch ? "Switch account" : "Reconnect original account" : "Connect Google Drive";
+  els.googleConnect.disabled = !google?.configured || google?.authorizationPending;
+  els.googleDisconnect.hidden = !google?.connected;
+  els.googleDisconnect.disabled = google?.authorizationPending;
+  els.googlePicker.disabled = !google?.connected || google?.authorizationPending;
+  els.googleDefaultFolder.disabled = !google?.connected || google?.authorizationPending;
+  els.googleStatus.textContent = google?.error || (!google?.configured ? "Google Drive is unavailable in this installation. Local saving is ready." : google.authorizationPending ? "Complete Google sign-in in the browser." : google.connected && !google.canSwitch ? "Complete or discard unfinished cloud batches before switching accounts." : google.connected ? "Choose your destination folder. Temporary copies are removed after verified uploads." : "Connect your Google account to save original videos.");
+}
+
+async function authorizeGoogle(selectFolder) {
+  const popup = window.open("about:blank", "gopro-google-authorization");
+  try {
+    const response = await api(selectFolder ? "/api/cloud/google/folder-picker" : "/api/cloud/google/connect", { method: "POST", body: {} });
+    if (response.browserOpened) popup?.close();
+    else if (popup) popup.location.href = response.authorizationUrl;
+    else throw new Error("Allow the Google sign-in window, then try again.");
+    await refreshGoogleStatus();
+    clearInterval(state.authorizationPollTimer);
+    state.authorizationPollTimer = window.setInterval(() => {
+      void runUiTask(async () => {
+        await refreshGoogleStatus();
+        if (!state.google.authorizationPending) clearInterval(state.authorizationPollTimer);
+      });
+    }, 400);
+  } catch (error) { popup?.close(); throw error; }
+}
+
 async function refreshStatus() {
   const response = await api("/api/status");
   state.session = response.session;
   state.candidates = response.candidates || [];
+  state.recoverableJobs = response.recoverableJobs || [];
+  if (response.activeDownloadJob?.destination.type === 'google-drive') {
+    els.saveDestination.value = 'google-drive';
+    renderSavingPreferences();
+  }
   setDownloadJob(response.activeDownloadJob || null, {
     logTransitions: false
   });
@@ -233,7 +321,7 @@ async function refreshStatus() {
     renderMedia();
     renderPendingQueue();
     renderDownloadJob();
-    redirectToHome();
+    if (!state.downloadJob) redirectToHome();
   }
 }
 
@@ -349,6 +437,9 @@ async function startPendingQueueDownload() {
     method: "POST",
     body: {
       downloadRoot: els.downloadRoot.value.trim(),
+      destination: { type: els.saveDestination.value, ...(els.saveDestination.value === 'google-drive' ? { accountId: state.google?.account?.id, folderId: state.google?.folder?.id } : {}) },
+      stagingRoot: els.stagingRoot.value.trim(),
+      recordingTimezone: els.recordingTimezone.value.trim(),
       files: batch.map((item) => ({
         directory: item.directory,
         name: item.name,
@@ -364,6 +455,7 @@ async function startPendingQueueDownload() {
   renderPendingQueue();
   renderDownloadJob();
   startDownloadPolling(response.job.id);
+  await refreshGoogleStatus();
 }
 
 async function addFilesToQueue(files, sourceLabel) {
@@ -479,7 +571,15 @@ async function pollDownloadJob(jobId) {
 
   if (!isDownloadActive()) {
     stopDownloadPolling();
+    await refreshGoogleStatus();
+    await refreshRecoveries();
   }
+}
+
+async function refreshRecoveries() {
+  const response = await api('/api/download-jobs');
+  state.recoverableJobs = response.jobs.filter(job => ['paused', 'failed', 'completed_with_errors'].includes(job.status));
+  renderDownloadJob();
 }
 
 function startDownloadPolling(jobId) {
@@ -508,7 +608,7 @@ function setDownloadJob(job, options = {}) {
   }
 
   if (job.status === "completed") {
-    appendLog(`Download finished. Saved ${job.completedFiles} file${job.completedFiles === 1 ? "" : "s"} to ${job.downloadRoot}.`);
+    appendLog(`Saved ${job.completedFiles} video${job.completedFiles === 1 ? "" : "s"} to ${destinationLabel(job)}.`);
   } else if (job.status === "failed") {
     appendLog(`Download failed: ${job.error || "Unknown error"}`);
   }
@@ -736,7 +836,7 @@ function renderPreview() {
   if (!preview.file) {
     els.previewTitle.textContent = "Select a file";
     els.previewBody.className = "preview-body is-empty";
-    els.previewBody.innerHTML = `Choose a photo or video and click <strong>Preview</strong> to inspect a lightweight version before downloading.`;
+    els.previewBody.innerHTML = `Choose a video and click <strong>Preview</strong> to inspect a lightweight version before saving the original.`;
     els.previewMeta.innerHTML = "";
     return;
   }
@@ -806,11 +906,44 @@ function renderDownloadJob() {
   const active = isDownloadActive();
   const queuedCount = state.pendingQueue.length;
   const queuedBytes = state.pendingQueue.reduce((sum, item) => sum + Number(item.sizeBytes || 0), 0);
-  const downloadRoot = els.downloadRoot.value.trim() || "./downloads";
+  const downloadRoot = job ? destinationLabel(job) : els.saveDestination.value === "google-drive" ? `Google Drive · ${state.google?.folder?.name || "Choose a folder"}` : els.downloadRoot.value.trim() || "./downloads";
   const nextQueuedItem = state.pendingQueue[0] || null;
+  els.recoverySettings.hidden = !state.recoverableJobs.length;
+  els.recoveryBatch.disabled = active;
+  els.recoveryBatch.innerHTML = state.recoverableJobs.map(batch => `<option value="${escapeHtml(batch.id)}">${escapeHtml(formatTimestamp(batch.createdAt))} · ${escapeHtml(batch.files[0]?.name || "Batch")} · ${escapeHtml(formatJobBadge(batch.status))}</option>`).join('');
+  if (job && state.recoverableJobs.some(batch => batch.id === job.id)) els.recoveryBatch.value = job.id;
+  els.recoveryBatch.onchange = () => runUiTask(async () => {
+    const response = await api(`/api/download-jobs/${els.recoveryBatch.value}`);
+    setDownloadJob(response.job);
+  });
+  els.resumeBatchBtn.hidden = job?.status !== "paused";
+  els.retryBatchBtn.hidden = !job?.files.some(item => item.status === "failed");
+  for (const [button, action] of [[els.resumeBatchBtn, 'resume'], [els.retryBatchBtn, 'retry']]) button.onclick = () => runUiTask(async () => {
+    button.disabled = true;
+    try {
+      const response = await api(`/api/download-jobs/${job.id}/${action}`, { method: "POST", body: {} });
+      setDownloadJob(response.job);
+      startDownloadPolling(job.id);
+    } finally { button.disabled = false; }
+  });
+  els.pauseBatchBtn.hidden = !active;
+  els.discardBatchBtn.hidden = !job || !["paused", "failed", "completed_with_errors"].includes(job.status);
+  for (const [button, action] of [[els.pauseBatchBtn, "pause"], [els.discardBatchBtn, "discard"]]) {
+    button.onclick = () => runUiTask(async () => {
+      button.disabled = true;
+      try {
+        const response = await api(`/api/download-jobs/${job.id}/${action}`, { method: "POST", body: {} });
+        stopDownloadPolling();
+        setDownloadJob(response.job);
+        await refreshGoogleStatus();
+        await refreshRecoveries();
+      } finally { button.disabled = false; }
+    });
+  }
 
   els.disconnectBtn.disabled = active;
-  els.startQueueBtn.disabled = active || !queuedCount || !state.session;
+  const cloudReady = els.saveDestination.value !== "google-drive" || (state.google?.connected && state.google?.folder && !state.google?.authorizationPending);
+  els.startQueueBtn.disabled = active || !queuedCount || !state.session || !cloudReady;
   els.clearQueueBtn.disabled = !queuedCount;
 
   if (!job) {
@@ -860,7 +993,7 @@ function renderDownloadJob() {
   els.statTotalFiles.textContent = String(job.totalFiles);
   els.statCompletedFiles.textContent = String(job.completedFiles);
   els.statTransferred.textContent = formatBytes(job.transferredBytes);
-  els.statDownloadRoot.textContent = job.downloadRoot;
+  els.statDownloadRoot.textContent = downloadRoot;
   els.overallProgressFill.style.width = `${job.overallPercent || 0}%`;
   els.overallProgressText.textContent = `${formatBytes(job.transferredBytes)} of ${formatBytes(job.totalBytes)}${job.overallPercent !== null ? ` (${job.overallPercent}%)` : ""}`;
 
@@ -872,17 +1005,17 @@ function renderDownloadJob() {
 
   if (job.currentItem) {
     els.currentProgressFill.style.width = `${job.currentItem.percent || 0}%`;
-    els.currentProgressText.textContent = `${job.currentItem.name}: ${formatBytes(job.currentItem.downloadedBytes)} of ${formatBytes(job.currentItem.sizeBytes)}${job.currentItem.percent !== null ? ` (${job.currentItem.percent}%)` : ""}`;
+    els.currentProgressText.textContent = `${formatStage(job.currentItem.stage)} · ${formatBytes(job.currentItem.stageBytes)} of ${formatBytes(job.currentItem.sizeBytes)}`;
     els.currentFileName.textContent = job.currentItem.name;
     els.currentFileMeta.textContent = joinCompactParts([
       job.currentItem.directory,
-      `${formatBytes(job.currentItem.downloadedBytes)} of ${formatBytes(job.currentItem.sizeBytes)}`,
+      `${formatStage(job.currentItem.stage)}: ${formatBytes(job.currentItem.stageBytes)} of ${formatBytes(job.currentItem.sizeBytes)}`,
       formatTransferRate(job.speedBytesPerSecond),
       `ETA ${formatEta(job.currentItem.etaSeconds, job.status)}`
     ]);
     foldedFileName = job.currentItem.name;
     foldedFileMeta = joinCompactParts([
-      `${formatBytes(job.currentItem.downloadedBytes)} of ${formatBytes(job.currentItem.sizeBytes)}`,
+      `${formatStage(job.currentItem.stage)}: ${formatBytes(job.currentItem.stageBytes)} of ${formatBytes(job.currentItem.sizeBytes)}`,
       job.currentItem.percent !== null ? `${job.currentItem.percent}%` : "",
       job.currentItem.directory
     ]);
@@ -894,7 +1027,7 @@ function renderDownloadJob() {
 
     if (job.status === "completed") {
       foldedFileName = "Batch finished";
-      foldedFileMeta = `Saved ${job.completedFiles} file${job.completedFiles === 1 ? "" : "s"} to ${job.downloadRoot}`;
+      foldedFileMeta = `Saved ${job.completedFiles} video${job.completedFiles === 1 ? "" : "s"} to ${downloadRoot}`;
     } else if (job.status === "failed") {
       foldedFileName = "Download failed";
       foldedFileMeta = job.error || "The active batch hit an error.";
@@ -902,21 +1035,33 @@ function renderDownloadJob() {
   }
 
   if (job.status === "running" || job.status === "queued") {
-    els.downloadHeadline.textContent = `Downloading ${job.completedFiles} of ${job.totalFiles} files`;
+    els.downloadHeadline.textContent = job.currentItem ? formatStage(job.currentItem.stage) : "Preparing batch";
     els.downloadInlineMeta.textContent = joinCompactParts([
-      `Saving into ${job.downloadRoot}`,
+      `Saving to ${downloadRoot}`,
       formatTransferRate(job.speedBytesPerSecond),
       `ETA ${formatEta(job.etaSeconds, job.status)}`
     ]);
-    els.downloadSummary.textContent = `Files are being saved to ${job.downloadRoot}. You can keep building the next queue while this batch runs.`;
+    els.downloadSummary.textContent = `Saving ${job.completedFiles} of ${job.totalFiles} videos to ${downloadRoot}. ${formatBytes(job.retainedBytes)} retained in temporary storage. Recording timezone: ${job.recordingTimezone}.`;
   } else if (job.status === "completed") {
-    els.downloadHeadline.textContent = "Download complete";
+    els.downloadHeadline.textContent = "Save complete";
     els.downloadInlineMeta.textContent = `Finished at ${formatTimestamp(job.finishedAt)}`;
-    els.downloadSummary.textContent = `Saved ${job.completedFiles} file${job.completedFiles === 1 ? "" : "s"} to ${job.downloadRoot}.`;
+    els.downloadSummary.textContent = `Saved ${job.completedFiles} video${job.completedFiles === 1 ? '' : 's'} to ${downloadRoot}. Recording timezone: ${job.recordingTimezone}.`;
   } else if (job.status === "failed") {
-    els.downloadHeadline.textContent = "Download failed";
-    els.downloadInlineMeta.textContent = `Stopped while saving into ${job.downloadRoot}`;
+    els.downloadHeadline.textContent = "Save failed";
+    els.downloadInlineMeta.textContent = `Stopped while saving to ${downloadRoot}`;
     els.downloadSummary.textContent = job.error || "The GoPro stopped responding during the transfer.";
+  } else if (job.status === "paused") {
+    els.downloadHeadline.textContent = "Batch paused";
+    els.downloadInlineMeta.textContent = downloadRoot;
+    els.downloadSummary.textContent = `${job.error || "Resume when ready. Completed videos remain saved."} ${formatBytes(job.retainedBytes)} retained in temporary storage.`;
+  } else if (job.status === "completed_with_errors") {
+    els.downloadHeadline.textContent = "Finished with errors";
+    els.downloadInlineMeta.textContent = `${job.completedFiles} of ${job.totalFiles} videos saved to ${downloadRoot}`;
+    els.downloadSummary.textContent = `Retry failed videos when ready. ${formatBytes(job.retainedBytes)} retained in temporary storage.`;
+  } else if (job.status === "discarded") {
+    els.downloadHeadline.textContent = "Unfinished work discarded";
+    els.downloadInlineMeta.textContent = "Completed videos remain saved.";
+    els.downloadSummary.textContent = "Temporary originals and remaining work were cleared. Camera originals are unchanged.";
   }
 
   renderFoldedDownloadBar({
@@ -931,81 +1076,6 @@ function renderDownloadJob() {
   renderActiveJobList(job);
 }
 
-function renderDownloadJobLegacy() {
-  const job = state.downloadJob;
-  const active = isDownloadActive();
-  const queuedCount = state.pendingQueue.length;
-  const queuedBytes = state.pendingQueue.reduce((sum, item) => sum + Number(item.sizeBytes || 0), 0);
-  const downloadRoot = els.downloadRoot.value.trim() || "./downloads";
-
-  els.disconnectBtn.disabled = active;
-  els.startQueueBtn.disabled = active || !queuedCount || !state.session;
-  els.clearQueueBtn.disabled = !queuedCount;
-
-  if (!job) {
-    els.downloadStatusCard.className = "download-status-card is-idle";
-    els.downloadBadge.className = `download-badge ${queuedCount ? "is-ready" : "is-idle"}`;
-    els.downloadBadge.textContent = queuedCount ? "Ready" : "Idle";
-    els.downloadHeadline.textContent = queuedCount ? `Queue ready for ${queuedCount} file${queuedCount === 1 ? "" : "s"}.` : "No active download.";
-    els.downloadInlineMeta.textContent = queuedCount ? `${formatBytes(queuedBytes)} waiting for the next batch.` : "Queue files to get started.";
-    els.statTotalFiles.textContent = String(queuedCount);
-    els.statCompletedFiles.textContent = "0";
-    els.statTransferred.textContent = "0 B";
-    els.statDownloadRoot.textContent = downloadRoot;
-    els.overallProgressFill.style.width = "0%";
-    els.currentProgressFill.style.width = "0%";
-    els.overallProgressText.textContent = "0 B of 0 B";
-    els.currentProgressText.textContent = "Waiting for a download to start";
-    els.currentFileName.textContent = queuedCount ? state.pendingQueue[0].name : "Nothing downloading";
-    els.currentFileMeta.textContent = queuedCount
-      ? "The queue is staged. Start the batch whenever you are ready."
-      : "Build a queue, reorder it if needed, then start the batch when you are ready.";
-    els.activeJobList.innerHTML = `<div class="job-list-empty">${queuedCount ? "No batch is running yet. Start the queue to begin downloading." : "No active batch yet."}</div>`;
-    els.downloadSummary.textContent = queuedCount
-      ? `Ready to save ${formatBytes(queuedBytes)} into ${downloadRoot}.`
-      : "Preview a file first if you want to check the low-res version before offloading it.";
-    return;
-  }
-
-  els.downloadStatusCard.className = `download-status-card is-${job.status}`;
-  els.downloadBadge.className = `download-badge is-${job.status}`;
-  els.downloadBadge.textContent = formatJobBadge(job.status);
-  els.statTotalFiles.textContent = String(job.totalFiles);
-  els.statCompletedFiles.textContent = String(job.completedFiles);
-  els.statTransferred.textContent = formatBytes(job.transferredBytes);
-  els.statDownloadRoot.textContent = job.downloadRoot;
-  els.overallProgressFill.style.width = `${job.overallPercent || 0}%`;
-  els.overallProgressText.textContent = `${formatBytes(job.transferredBytes)} of ${formatBytes(job.totalBytes)}${job.overallPercent !== null ? ` (${job.overallPercent}%)` : ""}`;
-
-  if (job.currentItem) {
-    els.currentProgressFill.style.width = `${job.currentItem.percent || 0}%`;
-    els.currentProgressText.textContent = `${job.currentItem.name}: ${formatBytes(job.currentItem.downloadedBytes)} of ${formatBytes(job.currentItem.sizeBytes)}${job.currentItem.percent !== null ? ` (${job.currentItem.percent}%)` : ""}`;
-    els.currentFileName.textContent = job.currentItem.name;
-    els.currentFileMeta.textContent = `${job.currentItem.directory} · ${formatBytes(job.currentItem.downloadedBytes)} downloaded of ${formatBytes(job.currentItem.sizeBytes)}`;
-  } else {
-    els.currentProgressFill.style.width = job.status === "completed" ? "100%" : "0%";
-    els.currentProgressText.textContent = job.status === "completed" ? "All files finished." : "Waiting for the next file.";
-    els.currentFileName.textContent = job.status === "completed" ? "Batch finished" : "Waiting for the next file";
-    els.currentFileMeta.textContent = job.status === "failed" ? (job.error || "The active batch hit an error.") : "No file is actively transferring right now.";
-  }
-
-  if (job.status === "running" || job.status === "queued") {
-    els.downloadHeadline.textContent = `Downloading ${job.completedFiles} of ${job.totalFiles} files`;
-    els.downloadInlineMeta.textContent = `Saving into ${job.downloadRoot}`;
-    els.downloadSummary.textContent = `Files are being saved to ${job.downloadRoot}. You can keep building the next queue while this batch runs.`;
-  } else if (job.status === "completed") {
-    els.downloadHeadline.textContent = "Download complete";
-    els.downloadInlineMeta.textContent = `Finished at ${formatTimestamp(job.finishedAt)}`;
-    els.downloadSummary.textContent = `Saved ${job.completedFiles} file${job.completedFiles === 1 ? "" : "s"} to ${job.downloadRoot}.`;
-  } else if (job.status === "failed") {
-    els.downloadHeadline.textContent = "Download failed";
-    els.downloadInlineMeta.textContent = `Stopped while saving into ${job.downloadRoot}`;
-    els.downloadSummary.textContent = job.error || "The GoPro stopped responding during the transfer.";
-  }
-
-  renderActiveJobList(job);
-}
-
 function renderPendingQueue() {
   const count = state.pendingQueue.length;
   const totalBytes = state.pendingQueue.reduce((sum, item) => sum + Number(item.sizeBytes || 0), 0);
@@ -1017,7 +1087,8 @@ function renderPendingQueue() {
     ? `${formatBytes(totalBytes)} across ${count} file${count === 1 ? "" : "s"}. ${active ? "This queue will wait for the active batch to finish." : "Reorder or remove anything before you start."}`
     : "Add files from the footage browser or the preview panel to build a batch before downloading.";
 
-  els.startQueueBtn.disabled = active || !count || !state.session;
+  const cloudReady = els.saveDestination.value !== "google-drive" || (state.google?.connected && state.google?.folder && !state.google?.authorizationPending);
+  els.startQueueBtn.disabled = active || !count || !state.session || !cloudReady;
   els.clearQueueBtn.disabled = !count;
 
   if (!count) {
@@ -1069,7 +1140,9 @@ function renderActiveJobList(job) {
 
   els.activeJobList.innerHTML = job.files
     .map((item) => {
-      const percent = item.status === "completed" ? 100 : item.status === "running" ? (item.sizeBytes ? Math.max(1, Number(((item.downloadedBytes / item.sizeBytes) * 100).toFixed(1))) : null) : 0;
+      const transferringUpload = ['uploading', 'verifying'].includes(item.stage);
+      const stageBytes = transferringUpload ? item.uploadedBytes : item.downloadedBytes;
+      const percent = ['completed', 'skipped'].includes(item.status) ? 100 : item.sizeBytes ? Math.min(99, stageBytes / item.sizeBytes * 100) : 0;
       return `
         <div class="job-file-row is-${escapeHtml(item.status)}">
           <div class="job-file-main">
@@ -1077,7 +1150,8 @@ function renderActiveJobList(job) {
               <strong>${escapeHtml(item.name)}</strong>
               <span class="job-file-badge is-${escapeHtml(item.status)}">${escapeHtml(formatJobBadge(item.status))}</span>
             </div>
-            <div class="job-file-meta">${escapeHtml(item.directory)} · ${formatBytes(item.downloadedBytes)} of ${formatBytes(item.sizeBytes)}</div>
+            <div class="job-file-meta">${escapeHtml(item.recordingDate)}${item.recordingDate === 'Unknown date' ? ' · Camera recording date unavailable' : ''} · ${escapeHtml(formatStage(item.stage))} · ${formatBytes(stageBytes)} of ${formatBytes(item.sizeBytes)}</div>
+            ${['completed', 'skipped'].includes(item.status) && item.driveFileId ? `<a href="https://drive.google.com/file/d/${encodeURIComponent(item.driveFileId)}/view" target="_blank" rel="noopener noreferrer">Open saved ${escapeHtml(item.name)}</a>` : ''}
             ${item.status === "running" ? `
               <div class="job-file-progress">
                 <div class="job-file-progress-fill" style="width:${percent || 0}%"></div>
@@ -1098,9 +1172,17 @@ function formatJobBadge(status) {
       queued: "Queued",
       running: "Running",
       completed: "Completed",
-      failed: "Failed"
+      failed: "Failed", paused: "Paused", completed_with_errors: "Finished with errors", skipped: "Skipped", discarded: "Discarded"
     }[status] || "Unknown"
   );
+}
+
+function destinationLabel(job) {
+  return job.destination?.type === 'google-drive' ? `Google Drive · ${job.destination.name}` : job.downloadRoot;
+}
+
+function formatStage(stage) {
+  return { downloading: 'Downloading original', uploading: 'Uploading original', verifying: 'Verifying original', saved: 'Saved' }[stage] || 'Waiting';
 }
 
 function isDownloadActive() {

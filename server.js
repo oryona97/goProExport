@@ -1,11 +1,14 @@
 const http = require("http");
-const { randomUUID } = require("crypto");
+const { randomUUID, createHash } = require("crypto");
 const fs = require("fs");
 const fsp = require("fs/promises");
 const os = require("os");
 const path = require("path");
 const { Readable, Transform } = require("stream");
 const { pipeline } = require("stream/promises");
+const { JobStore } = require("./lib/job-store");
+const { GoogleDrive } = require("./lib/google-drive");
+const { openSystemBrowser } = require("./lib/system-browser");
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT || 4173);
@@ -47,10 +50,27 @@ const DOC_SUMMARY = [
 const state = {
   session: null,
   downloadJobs: new Map(),
+  jobActions: new Set(),
   thumbnailCache: new Map(),
   thumbnailPending: new Map(),
   thumbnailQueue: Promise.resolve()
 };
+const DATA_ROOT = process.env.GOPRO_DATA_DIR || path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "GoProExport");
+const googleDrive = new GoogleDrive(DATA_ROOT);
+// Providers implement validateDestination and saveOriginal; the coordinator owns staging and recovery.
+const saveProviders = new Map([["google-drive", googleDrive]]);
+const jobStore = new JobStore(DATA_ROOT);
+const jobsReady = jobStore.load().then(records => {
+  for (const job of records) {
+    if (["queued", "running"].includes(job.status)) {
+      job.status = "paused";
+      job.error = "App restarted. Resume when ready.";
+      for (const item of job.items) if (item.status === "running") { item.status = "queued"; item.downloadedBytes = 0; }
+    }
+    job.progressSamples = [];
+    state.downloadJobs.set(job.id, job);
+  }
+});
 
 const THUMBNAIL_CACHE_TTL_MS = 5 * 60 * 1000;
 
@@ -60,13 +80,13 @@ function createServer() {
       await routeRequest(req, res);
     } catch (error) {
       console.error(
-        `[${new Date().toISOString()}] ${req.method || "GET"} ${req.url || "/"} failed:`,
-        error
+        `[${new Date().toISOString()}] ${req.method || "GET"} ${(req.url || "/").split("?")[0]} failed:`,
+        error.message
       );
       if (res.headersSent) {
         res.destroy();
       } else {
-        sendJson(res, 500, {
+        sendJson(res, error.statusCode || 500, {
           error: error instanceof Error ? error.message : String(error)
         });
       }
@@ -75,8 +95,43 @@ function createServer() {
 }
 
 async function routeRequest(req, res) {
+  const allowedHosts = [`127.0.0.1:${req.socket.localPort}`, `localhost:${req.socket.localPort}`];
+  if (!allowedHosts.includes((req.headers.host || "").toLowerCase())) throw Object.assign(new Error("Open the app through its local address"), { statusCode: 403 });
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    if (req.headers["sec-fetch-site"] === "cross-site" || (req.headers.origin && !allowedHosts.some(host => req.headers.origin === `http://${host}`))) throw Object.assign(new Error("This action must come from the local app"), { statusCode: 403 });
+  }
+  await jobsReady;
+  await googleDrive.ready;
   const requestUrl = new URL(req.url, `http://${req.headers.host || `${HOST}:${PORT}`}`);
   const pathname = requestUrl.pathname;
+
+  if (pathname === "/api/cloud/google/status" && req.method === "GET") return sendJson(res, 200, { ...googleDrive.status(), canSwitch: !lockedCloudAccount() });
+  if (pathname === "/api/cloud/google/cancel-authorization" && req.method === "POST") {
+    await googleDrive.cancelAuthorization();
+    return sendJson(res, 200, googleDrive.status());
+  }
+  if (pathname === "/api/cloud/google/disconnect" && req.method === "POST") {
+    for (const job of state.downloadJobs.values()) if (job.destination?.type === "google-drive" && ["running", "queued"].includes(job.status)) {
+      job.controller?.abort(); await job.task; job.status = "paused";
+    }
+    await jobStore.save(state.downloadJobs);
+    await googleDrive.disconnect();
+    return sendJson(res, 200, googleDrive.status());
+  }
+  if (pathname === "/api/cloud/google/folder" && req.method === "POST") return sendJson(res, 200, { folder: await googleDrive.createDefaultFolder() });
+  if (pathname === "/oauth/google/callback" && req.method === "GET") {
+    googleDrive.authInFlight += 1;
+    try { await googleDrive.finishAuthorization(requestUrl.searchParams, lockedCloudAccount); }
+    catch (error) { googleDrive.authorizationError = error.message; throw error; }
+    finally { googleDrive.authInFlight -= 1; }
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+    return res.end('<!doctype html><html><head><title>Google Drive connected</title></head><body><h1>Google Drive connected</h1><p>Return to GoPro Export to save your videos.</p><a href="/main">Open workspace</a></body></html>');
+  }
+
+  if (["/api/cloud/google/connect", "/api/cloud/google/folder-picker"].includes(pathname) && req.method === "POST") {
+    const authorizationUrl = googleDrive.authorize(`http://${HOST}:${req.socket.localPort}/oauth/google/callback`, pathname.endsWith("folder-picker"), lockedCloudAccount());
+    return sendJson(res, 200, { authorizationUrl, browserOpened: await openSystemBrowser(authorizationUrl) });
+  }
 
   if (pathname === "/api/docs" && req.method === "GET") {
     return sendJson(res, 200, {
@@ -97,14 +152,17 @@ async function routeRequest(req, res) {
 
   if (pathname === "/api/status" && req.method === "GET") {
     const activeJob = findActiveDownloadJob();
+    const recoverableJobs = [...state.downloadJobs.values()].reverse().filter(job => ["paused", "failed", "completed_with_errors"].includes(job.status));
     return sendJson(res, 200, {
       session: presentSession(),
       candidates: listCandidateUsbIps(),
-      activeDownloadJob: activeJob ? presentDownloadJob(activeJob) : null
+      activeDownloadJob: activeJob ? presentDownloadJob(activeJob) : recoverableJobs[0] ? presentDownloadJob(recoverableJobs[0]) : null,
+      recoverableJobs: recoverableJobs.map(presentDownloadJob)
     });
   }
 
   if (pathname === "/api/connect" && req.method === "POST") {
+    if (state.preparingBatch || findActiveDownloadJob()) return sendJson(res, 409, { error: "Pause the current batch before changing the camera" });
     const body = await readJsonBody(req);
     const session = await connectToCamera(body || {});
     return sendJson(res, 200, {
@@ -130,28 +188,25 @@ async function routeRequest(req, res) {
     return proxyPreviewAsset(req, res, requestUrl.searchParams);
   }
 
-  if (pathname === "/api/download" && req.method === "POST") {
-    ensureConnected();
-    const body = await readJsonBody(req);
-    const result = await downloadMedia(body || {});
-    return sendJson(res, 200, result);
+  if (pathname === "/api/download-jobs" && req.method === "GET") {
+    return sendJson(res, 200, { jobs: [...state.downloadJobs.values()].reverse().map(presentDownloadJob) });
   }
 
-  if (pathname === "/api/download-jobs" && req.method === "POST") {
+  if (["/api/download-jobs", "/api/download"].includes(pathname) && req.method === "POST") {
     ensureConnected();
 
     const activeJob = findActiveDownloadJob();
-    if (activeJob) {
+    if (activeJob || state.preparingBatch) {
       return sendJson(res, 409, {
-        error: `A download is already running for job ${activeJob.id}.`
+        error: "Another save batch is preparing or running."
       });
     }
-
-    const body = await readJsonBody(req);
-    const job = await createDownloadJob(body || {});
-    return sendJson(res, 202, {
-      job: presentDownloadJob(job)
-    });
+    state.preparingBatch = true;
+    try {
+      const body = await readJsonBody(req);
+      const job = await createDownloadJob(body || {});
+      return sendJson(res, 202, { job: presentDownloadJob(job) });
+    } finally { state.preparingBatch = false; }
   }
 
   const downloadJobMatch = pathname.match(/^\/api\/download-jobs\/([a-z0-9-]+)$/i);
@@ -166,6 +221,50 @@ async function routeRequest(req, res) {
     return sendJson(res, 200, {
       job: presentDownloadJob(job)
     });
+  }
+
+  const jobAction = pathname.match(/^\/api\/download-jobs\/([a-z0-9-]+)\/(pause|resume|discard|retry)$/i);
+  if (jobAction && req.method === "POST") {
+    const job = state.downloadJobs.get(jobAction[1]);
+    if (!job) return sendJson(res, 404, { error: "Save batch not found" });
+    if (state.preparingBatch || state.jobActions.has(job.id)) return sendJson(res, 409, { error: "Another batch operation is in progress. Try again when it finishes." });
+    state.jobActions.add(job.id);
+    try {
+      if (jobAction[2] === "discard") {
+        job.controller?.abort();
+        await job.task;
+        job.status = "discarded";
+        for (const item of job.items) {
+          if (item.partialPath) await removeOwnedTemporary(job.destination?.type === "google-drive" ? job.stagingRoot : job.downloadRoot, item.partialPath);
+          item.stagedPath = null;
+          item.encryptedUploadSession = null;
+          item.sessionUrl = null;
+          if (!["completed", "skipped"].includes(item.status)) item.status = "discarded";
+        }
+        await jobStore.save(state.downloadJobs);
+      } else if (jobAction[2] === "pause") {
+        job.controller?.abort();
+        await job.task;
+        if (!["completed", "completed_with_errors", "failed"].includes(job.status)) job.status = "paused";
+        await jobStore.save(state.downloadJobs);
+      } else {
+        if (jobAction[2] === "retry") {
+          if (!["failed", "completed_with_errors", "paused"].includes(job.status) || !job.items.some(item => item.status === "failed")) return sendJson(res, 409, { error: "No failed videos to retry" });
+        } else if (job.status !== "paused") return sendJson(res, 409, { error: "Only a paused batch can resume" });
+        if (findActiveDownloadJob()) return sendJson(res, 409, { error: "Another batch is running" });
+        const needsCamera = job.items.some(item => !["completed", "skipped", "discarded"].includes(item.status) && !item.stagedPath);
+        if (needsCamera) {
+          ensureConnected();
+          if (!job.cameraSerial || job.cameraSerial !== state.session.cameraInfo?.serial_number) return sendJson(res, 409, { error: "Reconnect the original camera" });
+          job.targetIp = state.session.ip;
+        }
+        if (job.destination?.type === "google-drive" && googleDrive.status().account?.id !== job.destination.accountId) return sendJson(res, 409, { error: "Reconnect the original Google account" });
+        if (jobAction[2] === "retry") for (const item of job.items) if (item.status === "failed") item.status = "queued";
+        job.status = "queued";
+        job.task = runDownloadJob(job);
+      }
+      return sendJson(res, 200, { job: presentDownloadJob(job) });
+    } finally { state.jobActions.delete(job.id); }
   }
 
   if (pathname === "/" && req.method === "GET") {
@@ -405,7 +504,7 @@ async function probeCamera(ip) {
 
 async function fetchMediaList() {
   const mediaList = await goproGetJson(state.session.ip, "/gopro/media/list", { timeoutMs: 10000 });
-  const files = flattenMediaList(mediaList);
+  const files = flattenMediaList(mediaList).filter(file => file.type === "Video");
 
   return {
     session: presentSession(),
@@ -435,7 +534,7 @@ function flattenMediaList(mediaList) {
         preview: previewDescriptor,
         lowResSizeBytes: Number(fileEntry.glrv || 0),
         sizeBytes: Number(fileEntry.s || 0),
-        createdUnix: Number(fileEntry.cre || 0),
+        createdUnix: Number.isFinite(Number(fileEntry.cre)) ? Number(fileEntry.cre) : 0,
         modifiedUnix: Number(fileEntry.mod || 0),
         path: `${directoryEntry.d}/${filename}`
       });
@@ -870,49 +969,30 @@ function toHeaderCase(headerName) {
     .join("-");
 }
 
-async function downloadMedia(options) {
-  const plan = await prepareDownloadPlan(options);
-  await fsp.mkdir(plan.downloadRoot, { recursive: true });
-
-  const downloaded = [];
-  for (const item of plan.items) {
-    await fsp.mkdir(path.dirname(item.outputPath), { recursive: true });
-    const result = await downloadRemoteFile(state.session.ip, item, item.outputPath);
-
-    downloaded.push({
-      directory: item.directory,
-      name: item.name,
-      savedTo: item.outputPath,
-      sizeBytes: result.downloadedBytes
-    });
-  }
-
-  return {
-    ok: true,
-    root: plan.downloadRoot,
-    count: downloaded.length,
-    files: downloaded
-  };
-}
-
 async function createDownloadJob(options) {
   const plan = await prepareDownloadPlan(options);
 
   const job = {
     id: randomUUID(),
     targetIp: state.session.ip,
+    cameraSerial: state.session.cameraInfo?.serial_number || null,
     createdAt: new Date().toISOString(),
     startedAt: null,
     finishedAt: null,
     status: "queued",
     error: null,
     downloadRoot: plan.downloadRoot,
+    recordingTimezone: plan.recordingTimezone,
+    destination: plan.destination,
+    stagingRoot: plan.stagingRoot,
     items: plan.items.map((item, index) => ({
       id: `${index + 1}`,
       directory: item.directory,
       name: item.name,
       outputPath: item.outputPath,
       sizeBytes: Number(item.sizeBytes || 0),
+      createdUnix: item.createdUnix,
+      recordingDate: item.recordingDate,
       downloadedBytes: 0,
       status: "queued",
       error: null
@@ -924,9 +1004,11 @@ async function createDownloadJob(options) {
 
   recordJobProgress(job);
   state.downloadJobs.set(job.id, job);
+  try { await jobStore.save(state.downloadJobs); }
+  catch (error) { state.downloadJobs.delete(job.id); throw Object.assign(new Error("The batch could not be stored. Restore access to the app's data folder and try again."), { statusCode: 507 }); }
 
   setImmediate(() => {
-    void runDownloadJob(job);
+    if (job.status === "queued") job.task = runDownloadJob(job);
   });
 
   return job;
@@ -936,74 +1018,139 @@ async function runDownloadJob(job) {
   job.status = "running";
   job.startedAt = new Date().toISOString();
   job.error = null;
+  job.controller = new AbortController();
+  job.completedFiles = job.items.filter(item => ["completed", "skipped"].includes(item.status)).length;
+  job.completedBytes = job.items.filter(item => ["completed", "skipped"].includes(item.status)).reduce((sum, item) => sum + item.sizeBytes, 0);
   recordJobProgress(job);
 
   try {
-    await fsp.mkdir(job.downloadRoot, { recursive: true });
+    await jobStore.save(state.downloadJobs);
+    const provider = saveProviders.get(job.destination?.type);
+    const cloud = !!provider;
+    if (provider) await provider.validateDestination(job.destination);
+    await fsp.mkdir(cloud ? job.stagingRoot : job.downloadRoot, { recursive: true });
 
     for (const item of job.items) {
+      if (job.controller.signal.aborted) break;
+      if (["completed", "skipped", "failed"].includes(item.status)) continue;
       item.status = "running";
       item.error = null;
-      item.downloadedBytes = 0;
+      item.downloadedBytes = item.stagedPath ? item.sizeBytes : 0;
+      item.partialPath = item.partialPath || (cloud ? path.join(job.stagingRoot, `${job.id}-${item.id}.part`) : `${item.outputPath}.${randomUUID()}.part`);
+      await jobStore.save(state.downloadJobs);
 
-      await fsp.mkdir(path.dirname(item.outputPath), { recursive: true });
+      if (!cloud) await fsp.mkdir(path.dirname(item.outputPath), { recursive: true });
 
       try {
-        const result = await downloadRemoteFile(job.targetIp, item, item.outputPath, ({ downloadedBytes, totalBytes }) => {
-          if (totalBytes && item.sizeBytes !== totalBytes) {
-            item.sizeBytes = totalBytes;
+        let result;
+        if (!item.stagedPath) {
+          const availableOriginals = (await fetchMediaList()).files;
+          const source = availableOriginals.find(file => file.directory === item.directory && file.name === item.name);
+          if (!source || source.sizeBytes !== item.sizeBytes || source.createdUnix !== item.createdUnix) throw new Error("Camera original changed or is unavailable. The planned original was not saved.");
+          await removeOwnedTemporary(cloud ? job.stagingRoot : job.downloadRoot, item.partialPath);
+          const available = process.env.NODE_ENV === "test" && process.env.GOPRO_TEST_FREE_BYTES !== undefined
+            ? BigInt(process.env.GOPRO_TEST_FREE_BYTES)
+            : await freeDiskBytes(cloud ? job.stagingRoot : path.dirname(item.outputPath));
+          if (available < BigInt(item.sizeBytes)) throw Object.assign(new Error("Not enough local space for the next original. Free space or discard retained work, then resume."), { pause: true });
+          item.stage = "downloading";
+          result = await downloadRemoteFile(job.targetIp, item, item.outputPath, ({ downloadedBytes }) => {
+            item.downloadedBytes = downloadedBytes;
+            recordJobProgress(job);
+          }, job.controller.signal, cloud);
+          if (cloud) {
+            item.stagedPath = result.outputPath;
+            item.md5 = result.md5;
+            item.sha256 = result.sha256;
+            await jobStore.save(state.downloadJobs);
           }
-          item.downloadedBytes = downloadedBytes;
-          recordJobProgress(job);
-        });
+        }
+        if (cloud) {
+          item.stage = "uploading";
+          result = await provider.saveOriginal(item, job.destination, () => jobStore.save(state.downloadJobs), job.controller.signal, () => recordJobProgress(job));
+          await removeOwnedTemporary(job.stagingRoot, item.stagedPath);
+          item.stagedPath = null;
+          item.encryptedUploadSession = null;
+          item.sessionUrl = null;
+        }
 
         item.downloadedBytes = result.downloadedBytes;
-        item.status = "completed";
+        item.outputPath = result.outputPath;
+        item.status = result.skipped ? "skipped" : "completed";
+        item.stage = "saved";
         job.completedFiles += 1;
         job.completedBytes += result.downloadedBytes;
         recordJobProgress(job);
+        await jobStore.save(state.downloadJobs);
       } catch (error) {
+        if (job.controller.signal.aborted) { item.status = "queued"; item.downloadedBytes = item.stagedPath ? item.sizeBytes : 0; break; }
+        if (error.pause || isStorageAccessError(error)) {
+          item.status = "queued";
+          job.status = "paused";
+          job.error = error.message;
+          break;
+        }
         item.status = "failed";
         item.error = error instanceof Error ? error.message : String(error);
-        job.status = "failed";
         job.error = item.error;
         recordJobProgress(job);
-        throw error;
       }
     }
 
-    job.status = "completed";
+    job.status = job.status === "paused" || job.controller.signal.aborted ? "paused" : job.items.some(item => item.status === "failed")
+      ? (job.completedFiles ? "completed_with_errors" : "failed") : "completed";
   } catch (error) {
     if (job.status !== "failed") {
-      job.status = "failed";
+      job.status = error.pause || isStorageAccessError(error) ? "paused" : "failed";
       job.error = error instanceof Error ? error.message : String(error);
     }
   } finally {
     job.finishedAt = new Date().toISOString();
     recordJobProgress(job);
+    try { await jobStore.save(state.downloadJobs); }
+    catch { job.status = "paused"; job.error = "Recovery state could not be stored. Restore space and access to the app's data folder before resuming."; }
   }
 }
 
 async function prepareDownloadPlan(options) {
+  if (options.destination && !["local", "google-drive"].includes(options.destination.type)) throw Object.assign(new Error("Choose local saving or Google Drive"), { statusCode: 400 });
+  const recordingTimezone = options.recordingTimezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  try { new Intl.DateTimeFormat("en", { timeZone: recordingTimezone }); }
+  catch { throw Object.assign(new Error("Choose a valid recording timezone, for example Asia/Jerusalem or UTC"), { statusCode: 400 }); }
   const requestedFiles = Array.isArray(options.files) ? options.files : [];
-  const payload = requestedFiles.length ? requestedFiles : (await fetchMediaList()).files;
+  const availableFiles = (await fetchMediaList()).files;
+  const payload = requestedFiles.length ? requestedFiles.map(requested => {
+    const found = availableFiles.find(item => item.directory === requested.directory && item.name === requested.name);
+    if (!found) throw Object.assign(new Error(`Original video unavailable: ${requested.name}`), { statusCode: 400 });
+    return found;
+  }) : availableFiles;
 
   if (!payload.length) {
-    throw new Error("There are no files to download.");
+    throw Object.assign(new Error("There are no original videos to save."), { statusCode: 400 });
   }
 
   const baseRoot = resolveDownloadRoot(options.downloadRoot);
-  const sessionLabel = slugify(state.session.cameraName || state.session.ip || "gopro");
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const downloadRoot = path.join(baseRoot, `${timestamp}-${sessionLabel}`);
+  const downloadRoot = baseRoot;
+  const destination = options.destination?.type === "google-drive" ? { type: "google-drive", folderId: options.destination.folderId || googleDrive.status().folder?.id, accountId: googleDrive.status().account?.id } : { type: "local" };
+  if (destination.type === "google-drive") {
+    if (googleDrive.status().authorizationPending) throw Object.assign(new Error("Finish Google account selection before starting a batch"), { statusCode: 409 });
+    if (options.destination.accountId && options.destination.accountId !== destination.accountId) throw Object.assign(new Error("The selected Google account changed. Check the account and try again."), { statusCode: 409 });
+    if (!destination.accountId || !destination.folderId) throw Object.assign(new Error("Connect Google and choose a destination folder first"), { statusCode: 400 });
+    const folder = await googleDrive.validateDestination(destination);
+    destination.name = folder.name;
+    destination.accountEmail = googleDrive.status().account.email;
+    if (googleDrive.status().authorizationPending || googleDrive.status().account?.id !== destination.accountId) throw Object.assign(new Error("The selected Google account changed. Check the account and try again."), { statusCode: 409 });
+  }
 
   return {
     downloadRoot,
-    items: payload.map((item) => createDownloadItem(item, downloadRoot))
+    recordingTimezone,
+    destination,
+    stagingRoot: options.stagingRoot ? path.resolve(options.stagingRoot) : path.join(DATA_ROOT, "staging"),
+    items: payload.map((item) => createDownloadItem(item, downloadRoot, recordingTimezone))
   };
 }
 
-function createDownloadItem(item, downloadRoot) {
+function createDownloadItem(item, downloadRoot, timezone = Intl.DateTimeFormat().resolvedOptions().timeZone) {
   const directory = sanitizePathPart(item.directory, "100GOPRO");
   const name = sanitizePathPart(item.name, "media.bin");
 
@@ -1011,13 +1158,23 @@ function createDownloadItem(item, downloadRoot) {
     directory,
     name,
     sizeBytes: Number(item.sizeBytes || 0),
-    outputPath: path.join(downloadRoot, directory, name)
+    createdUnix: item.createdUnix,
+    recordingDate: recordingDay(item.createdUnix, timezone),
+    outputPath: path.join(downloadRoot, recordingDay(item.createdUnix, timezone), name)
   };
 }
 
-async function downloadRemoteFile(ip, item, outputPath, onProgress) {
+function recordingDay(seconds, timezone) {
+  const date = new Date(Number(seconds) * 1000);
+  if (!Number.isFinite(Number(seconds)) || Number(seconds) <= 0 || Number.isNaN(date.getTime())) return "Unknown date";
+  const parts = new Intl.DateTimeFormat("en", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+  return ["year", "month", "day"].map(type => parts.find(part => part.type === type).value).join("-");
+}
+
+async function downloadRemoteFile(ip, item, outputPath, onProgress, signal, stageOnly = false) {
   const response = await goproGet(ip, buildMediaDownloadEndpoint(item.directory, item.name), {
-    timeoutMs: 0
+    timeoutMs: 0,
+    signal
   });
 
   if (!response.body) {
@@ -1027,10 +1184,16 @@ async function downloadRemoteFile(ip, item, outputPath, onProgress) {
   const headerSize = Number(response.headers.get("content-length") || 0);
   const totalBytes = headerSize || Number(item.sizeBytes || 0);
   let downloadedBytes = 0;
+  const md5 = createHash("md5");
+  const sha256 = createHash("sha256");
+  const partialPath = item.partialPath || `${outputPath}.${randomUUID()}.part`;
+  await fsp.rm(partialPath, { force: true });
 
   const progressStream = new Transform({
     transform(chunk, encoding, callback) {
       downloadedBytes += chunk.length;
+      md5.update(chunk);
+      sha256.update(chunk);
       if (typeof onProgress === "function") {
         onProgress({
           downloadedBytes,
@@ -1042,16 +1205,80 @@ async function downloadRemoteFile(ip, item, outputPath, onProgress) {
   });
 
   try {
-    await pipeline(Readable.fromWeb(response.body), progressStream, fs.createWriteStream(outputPath));
+    await pipeline(Readable.fromWeb(response.body), progressStream, fs.createWriteStream(partialPath, { flags: "wx" }), { signal });
+    if (!item.sizeBytes || downloadedBytes !== item.sizeBytes) {
+      throw new Error(`Incomplete original ${item.name}: received ${downloadedBytes} of ${item.sizeBytes} bytes.`);
+    }
   } catch (error) {
-    await fsp.rm(outputPath, { force: true }).catch(() => {});
+    await fsp.rm(partialPath, { force: true }).catch(() => {});
     throw error;
+  }
+
+  if (stageOnly) return { outputPath: partialPath, downloadedBytes, totalBytes, md5: md5.digest("hex"), sha256: sha256.digest("hex") };
+
+  let skipped = false;
+  const dateDirectory = path.dirname(outputPath);
+  try {
+    for (let conflict = 0; ; conflict += 1) {
+      if (conflict) outputPath = path.join(dateDirectory, `Conflicts-${conflict}`, item.name);
+      await fsp.mkdir(path.dirname(outputPath), { recursive: true });
+      try {
+        try { await fsp.link(partialPath, outputPath); }
+        catch (error) {
+          if (!["EPERM", "EACCES", "ENOTSUP", "EOPNOTSUPP", "EXDEV"].includes(error.code)) throw error;
+          await copyExclusive(partialPath, outputPath, signal);
+        }
+        break;
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+        if ((await fileDigest(partialPath)) === (await fileDigest(outputPath))) { skipped = true; break; }
+      }
+    }
+  } finally {
+    await fsp.rm(partialPath, { force: true });
   }
 
   return {
     downloadedBytes,
-    totalBytes
+    totalBytes,
+    skipped,
+    outputPath
   };
+}
+
+async function fileDigest(filename, algorithm = "sha256") {
+  const hash = createHash(algorithm);
+  for await (const chunk of fs.createReadStream(filename)) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+async function freeDiskBytes(folder) {
+  const space = await fsp.statfs(folder, { bigint: true });
+  return space.bavail * space.bsize;
+}
+
+function isStorageAccessError(error) {
+  return ["ENOSPC", "EDQUOT", "EACCES", "EPERM", "EROFS", "ENOTDIR", "EEXIST"].includes(error.code);
+}
+
+async function copyExclusive(source, target, signal) {
+  const handle = await fsp.open(target, "wx");
+  try {
+    for await (const chunk of fs.createReadStream(source, { signal })) await handle.writeFile(chunk);
+    await handle.sync();
+  } catch (error) {
+    const owned = await handle.stat();
+    await handle.close();
+    const current = await fsp.stat(target).catch(() => null);
+    if (current && current.ino === owned.ino && current.dev === owned.dev) await fsp.rm(target);
+    throw error;
+  } finally { await handle.close().catch(() => {}); }
+}
+
+async function removeOwnedTemporary(root, filename) {
+  const relative = path.relative(path.resolve(root), path.resolve(filename));
+  if (relative.startsWith("..") || path.isAbsolute(relative) || !filename.endsWith(".part")) throw new Error("Unsafe temporary-file cleanup path");
+  await fsp.rm(filename, { force: true });
 }
 
 function findActiveDownloadJob() {
@@ -1064,10 +1291,15 @@ function findActiveDownloadJob() {
   return null;
 }
 
+function lockedCloudAccount() {
+  return [...state.downloadJobs.values()].find(job => job.destination?.type === "google-drive" && job.items.some(item => !["completed", "skipped", "discarded"].includes(item.status)))?.destination.accountId || null;
+}
+
 function presentDownloadJob(job) {
+  const cloud = job.destination?.type === "google-drive";
   const runningItem = job.items.find((item) => item.status === "running") || null;
   const totalFiles = job.items.length;
-  const totalBytes = job.items.reduce((sum, item) => sum + Number(item.sizeBytes || 0), 0);
+  const totalBytes = job.items.reduce((sum, item) => sum + Number(item.sizeBytes || 0), 0) * (cloud ? 2 : 1);
   const transferredBytes = getJobTransferredBytes(job);
   const speedBytesPerSecond = calculateTransferRate(job);
   const remainingBytes = Math.max(0, totalBytes - transferredBytes);
@@ -1076,8 +1308,10 @@ function presentDownloadJob(job) {
         directory: runningItem.directory,
         name: runningItem.name,
         downloadedBytes: runningItem.downloadedBytes,
+        stage: runningItem.stage,
+        stageBytes: cloud && ["uploading", "verifying"].includes(runningItem.stage) ? (runningItem.uploadedBytes || 0) : runningItem.downloadedBytes,
         sizeBytes: Number(runningItem.sizeBytes || 0),
-        percent: calculatePercent(runningItem.downloadedBytes, runningItem.sizeBytes),
+        percent: calculatePercent(cloud && ["uploading", "verifying"].includes(runningItem.stage) ? runningItem.uploadedBytes : runningItem.downloadedBytes, runningItem.sizeBytes),
         remainingBytes: Math.max(0, Number(runningItem.sizeBytes || 0) - Number(runningItem.downloadedBytes || 0)),
         etaSeconds: calculateEtaSeconds(
           Math.max(0, Number(runningItem.sizeBytes || 0) - Number(runningItem.downloadedBytes || 0)),
@@ -1095,12 +1329,15 @@ function presentDownloadJob(job) {
     finishedAt: job.finishedAt,
     error: job.error,
     downloadRoot: job.downloadRoot,
+    recordingTimezone: job.recordingTimezone,
+    destination: job.destination,
     totalFiles,
     completedFiles: job.completedFiles,
     totalBytes,
     transferredBytes,
     remainingBytes,
-    overallPercent: calculatePercent(transferredBytes, totalBytes),
+    overallPercent: Math.min(job.status === "completed" ? 100 : 99, calculatePercent(transferredBytes, totalBytes) || 0),
+    retainedBytes: job.items.reduce((sum, item) => sum + (item.stagedPath ? Number(item.sizeBytes || 0) : 0), 0),
     speedBytesPerSecond,
     etaSeconds: calculateEtaSeconds(remainingBytes, speedBytesPerSecond),
     currentItem,
@@ -1108,8 +1345,14 @@ function presentDownloadJob(job) {
       directory: item.directory,
       name: item.name,
       sizeBytes: item.sizeBytes,
+      recordingDate: item.recordingDate,
       downloadedBytes: item.downloadedBytes,
       status: item.status,
+      savedTo: item.outputPath,
+      driveFileId: item.driveFileId,
+      stage: item.stage,
+      uploadedBytes: item.uploadedBytes || 0,
+      retainedBytes: item.stagedPath ? item.sizeBytes : 0,
       error: item.error
     }))
   };
@@ -1134,8 +1377,8 @@ function recordJobProgress(job) {
 }
 
 function getJobTransferredBytes(job) {
-  const runningItem = job.items.find((item) => item.status === "running");
-  return job.completedBytes + Number(runningItem ? runningItem.downloadedBytes : 0);
+  const cloud = job.destination?.type === "google-drive";
+  return job.items.reduce((sum, item) => sum + (["completed", "skipped"].includes(item.status) ? Number(item.sizeBytes || 0) * (cloud ? 2 : 1) : Number(item.downloadedBytes || 0) + (cloud ? Number(item.uploadedBytes || 0) : 0)), 0);
 }
 
 function calculateTransferRate(job) {
@@ -1262,7 +1505,8 @@ async function safeJson(ip, pathname) {
 }
 
 async function goproGet(ip, pathname, options = {}) {
-  const requestUrl = new URL(`http://${ip}:8080${pathname}`);
+  const cameraPort = process.env.NODE_ENV === "test" ? Number(process.env.GOPRO_CAMERA_PORT || 8080) : 8080;
+  const requestUrl = new URL(`http://${ip}:${cameraPort}${pathname}`);
 
   for (const [key, value] of Object.entries(options.query || {})) {
     requestUrl.searchParams.set(key, String(value));
@@ -1281,7 +1525,7 @@ async function goproGet(ip, pathname, options = {}) {
     const response = await fetch(requestUrl, {
       method: options.method || "GET",
       headers: options.headers,
-      signal: controller ? controller.signal : undefined
+      signal: controller ? (options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal) : options.signal
     });
 
     if (!response.ok) {
@@ -1357,7 +1601,7 @@ function presentSession(sourceSession = state.session) {
 if (require.main === module) {
   const server = createServer();
   server.listen(PORT, HOST, () => {
-    console.log(`GoPro USB app running at http://${HOST}:${PORT}`);
+    console.log(`GoPro USB app running at http://${HOST}:${server.address().port}`);
   });
 
   const shutdown = async () => {

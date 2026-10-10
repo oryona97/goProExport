@@ -2,11 +2,15 @@
   "name": "gopro-usb-footage-app",
   "version": "0.1.0",
   "private": true,
-  "description": "Local app for browsing and downloading GoPro footage over USB-C using Open GoPro.",
+  "description": "Local app for previewing GoPro footage and saving originals to a local folder or Google Drive.",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.3"
+  },
+  "devDependencies": {
+    "playwright": "^1.64.0"
   }
 }

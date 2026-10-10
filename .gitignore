@@ -1,3 +1,5 @@
 downloads/
 node_modules/
 .agents/
+google-oauth.json
+.test-output/
